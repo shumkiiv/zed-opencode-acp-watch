@@ -13,6 +13,7 @@ Russian documentation: [README.ru.md](README.ru.md)
 - Watches OpenCode's SQLite database for real activity.
 - Tracks recursive child sessions, not only the visible parent session.
 - Shows heartbeat updates such as `OpenCode active (...)` when descendant tools, assistant messages, or recent child session updates are present.
+- Warns when OpenCode stops after an assistant message with no final text report, for example after a provider interruption or `finish: unknown`.
 - Helps with the common case where a parent task looks stale while `oracle`, `look_at`, `Sisyphus-Junior`, or other child agents are still working.
 
 ## Requirements

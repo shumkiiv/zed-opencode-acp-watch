@@ -13,6 +13,7 @@ English documentation: [README.md](README.md)
 - Следит за SQLite-базой OpenCode.
 - Учитывает рекурсивные дочерние сессии, а не только видимую родительскую строку.
 - Показывает heartbeat вида `OpenCode active (...)`, если есть активные descendant tools, assistant messages или свежие обновления дочерних сессий.
+- Предупреждает, если OpenCode остановился после assistant-сообщения без финального текстового отчёта, например после provider interruption или `finish: unknown`.
 - Закрывает частый случай: родительская задача выглядит старой, но `oracle`, `look_at`, `Sisyphus-Junior` или другие дочерние агенты ещё работают.
 
 ## Требования

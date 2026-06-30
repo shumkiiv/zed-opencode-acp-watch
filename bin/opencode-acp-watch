@@ -297,6 +297,54 @@ def activity_title(summary):
     )
 
 
+def missing_final_report_title(session_id, since_ms):
+    cutoff = since_ms or (now_ms() - ACTIVE_WINDOW_SEC * 1000)
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=1)
+        conn.execute("pragma query_only=ON")
+        query = """
+        select
+          m.id,
+          m.time_updated,
+          json_extract(m.data, '$.finish') as finish,
+          json_extract(m.data, '$.time.completed') as completed,
+          (
+            select count(*)
+            from part p
+            where p.message_id = m.id
+              and json_extract(p.data, '$.type') = 'text'
+              and length(trim(coalesce(json_extract(p.data, '$.text'), ''))) > 0
+          ) as text_parts
+        from message m
+        where m.session_id = ?
+          and json_extract(m.data, '$.role') = 'assistant'
+          and m.time_updated >= ?
+        order by m.time_updated desc
+        limit 1
+        """
+        row = conn.execute(query, (session_id, cutoff)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        message_id, updated, finish, completed, text_parts = row
+        if completed is None or int(text_parts or 0) > 0:
+            return None
+        finish_text = finish or "unknown"
+        age = max(0, int((now_ms() - int(updated or 0)) / 1000)) if updated else None
+        log(
+            "missing_final_report_detected",
+            session_id=session_id,
+            message_id=message_id,
+            finish=finish_text,
+            age=age,
+        )
+        age_text = f", last message {age}s ago" if age is not None else ""
+        return f"OpenCode stopped without final text report (finish {finish_text}{age_text})"
+    except Exception as exc:
+        log("missing_final_report_check_error", session_id=session_id, error=str(exc))
+        return None
+
+
 def recent_descendant_count(session_id, since_ms):
     try:
         conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=1)
@@ -455,8 +503,18 @@ def status_monitor_until_idle(session_id, prompt_start_ms):
                     quiet_since = now
                 idle_elapsed = now - quiet_since
                 if sent_status and idle_elapsed >= IDLE_GRACE_SEC:
-                    log("status_monitor_idle", session_id=session_id, elapsed=round(elapsed, 2))
-                    send_tool_call_update(session_id, "completed", "OpenCode active tools settled")
+                    idle_title = missing_final_report_title(session_id, prompt_start_ms)
+                    log(
+                        "status_monitor_idle",
+                        session_id=session_id,
+                        elapsed=round(elapsed, 2),
+                        missing_final_report=bool(idle_title),
+                    )
+                    send_tool_call_update(
+                        session_id,
+                        "completed",
+                        idle_title or "OpenCode active tools settled",
+                    )
                     sent_status = False
                     quiet_since = None
 
