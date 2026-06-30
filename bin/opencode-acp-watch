@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import fcntl
 import queue
 import sqlite3
 import subprocess
@@ -17,6 +18,12 @@ LOG_PATH = os.environ.get(
     "OPENCODE_ACP_WATCH_LOG",
     str(HOME / ".local/state/zed-opencode-acp-watch/opencode-acp-watch.log"),
 )
+START_LOCK_PATH = os.environ.get(
+    "OPENCODE_ACP_WATCH_START_LOCK",
+    str(HOME / ".local/state/zed-opencode-acp-watch/opencode-acp-start.lock"),
+)
+START_LOCK_TIMEOUT_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_START_LOCK_TIMEOUT_SEC", "15"))
+START_LOCK_HOLD_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_START_LOCK_HOLD_SEC", "5"))
 POLL_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_POLL_SEC", "2"))
 IDLE_GRACE_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_IDLE_GRACE_SEC", "2"))
 LATE_GRACE_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_LATE_GRACE_SEC", "20"))
@@ -57,6 +64,43 @@ def log(message, **fields):
         with log_lock:
             with open(LOG_PATH, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+
+def acquire_start_lock():
+    try:
+        Path(START_LOCK_PATH).parent.mkdir(parents=True, exist_ok=True)
+        lock_file = open(START_LOCK_PATH, "w", encoding="utf-8")
+        deadline = time.monotonic() + START_LOCK_TIMEOUT_SEC
+        waited = 0.0
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                log("start_lock_acquired", waited=round(waited, 2), path=START_LOCK_PATH)
+                return lock_file
+            except BlockingIOError:
+                if START_LOCK_TIMEOUT_SEC <= 0 or time.monotonic() >= deadline:
+                    log("start_lock_timeout", waited=round(waited, 2), path=START_LOCK_PATH)
+                    lock_file.close()
+                    return None
+                time.sleep(0.1)
+                waited += 0.1
+    except Exception as exc:
+        log("start_lock_error", error=str(exc), path=START_LOCK_PATH)
+        return None
+
+
+def release_start_lock(lock_file):
+    if not lock_file:
+        return
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        log("start_lock_released", path=START_LOCK_PATH)
+    except Exception as exc:
+        log("start_lock_release_error", error=str(exc), path=START_LOCK_PATH)
+    try:
+        lock_file.close()
     except Exception:
         pass
 
@@ -460,11 +504,13 @@ def status_monitor_until_idle(session_id, prompt_start_ms):
     status_announced = False
     quiet_since = None
     last_heartbeat = 0.0
+    exit_reason = "shutdown"
     log("status_monitor_begin", session_id=session_id, prompt_start_ms=prompt_start_ms)
 
     try:
         while not shutdown.is_set():
             if session_id in cancelled_sessions:
+                exit_reason = "cancelled"
                 log("status_monitor_cancelled", session_id=session_id)
                 break
 
@@ -519,6 +565,7 @@ def status_monitor_until_idle(session_id, prompt_start_ms):
                     quiet_since = None
 
             if elapsed >= STATUS_MONITOR_MAX_SEC:
+                exit_reason = "timeout"
                 log(
                     "status_monitor_timeout",
                     session_id=session_id,
@@ -534,7 +581,7 @@ def status_monitor_until_idle(session_id, prompt_start_ms):
                 time.sleep(max(POLL_SEC, STATUS_IDLE_POLL_SEC))
     finally:
         if sent_status:
-            send_tool_call_update(session_id, "completed", "OpenCode active tools settled")
+            log("status_monitor_left_open", session_id=session_id, reason=exit_reason)
         with status_lock:
             status_sessions.discard(session_id)
 
@@ -628,6 +675,7 @@ def forward_stderr(agent):
 
 def main():
     log("wrapper_start", real_opencode=REAL_OPENCODE, db=DB_PATH, hold=HOLD_RESPONSES)
+    start_lock = acquire_start_lock()
     agent = subprocess.Popen(
         [REAL_OPENCODE, "acp"],
         stdin=subprocess.PIPE,
@@ -643,6 +691,14 @@ def main():
     ]
     for thread in threads:
         thread.start()
+
+    if start_lock:
+        hold_until = time.monotonic() + max(0.0, START_LOCK_HOLD_SEC)
+        while time.monotonic() < hold_until:
+            if agent.poll() is not None:
+                break
+            time.sleep(0.1)
+        release_start_lock(start_lock)
 
     while not shutdown.is_set():
         if agent.poll() is not None:
@@ -668,4 +724,4 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    os._exit(main())

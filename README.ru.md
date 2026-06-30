@@ -14,6 +14,8 @@ English documentation: [README.md](README.md)
 - Учитывает рекурсивные дочерние сессии, а не только видимую родительскую строку.
 - Показывает heartbeat вида `OpenCode active (...)`, если есть активные descendant tools, assistant messages или свежие обновления дочерних сессий.
 - Предупреждает, если OpenCode остановился после assistant-сообщения без финального текстового отчёта, например после provider interruption или `finish: unknown`.
+- Сериализует почти одновременные старты ACP, чтобы снизить риск `database is locked` на SQLite-базе OpenCode.
+- Не помечает синтетический heartbeat как `completed` после `session/cancel`, чтобы Zed не подавал ложный сигнал "готово", пока задача перезапускается.
 - Закрывает частый случай: родительская задача выглядит старой, но `oracle`, `look_at`, `Sisyphus-Junior` или другие дочерние агенты ещё работают.
 
 ## Требования
@@ -67,6 +69,9 @@ cd zed-opencode-acp-watch
 | `OPENCODE_ACP_WATCH_REAL` | `~/.opencode/bin/opencode` | Настоящий исполняемый файл OpenCode. |
 | `OPENCODE_ACP_WATCH_DB` | `~/.local/share/opencode/opencode.db` | SQLite-база OpenCode. |
 | `OPENCODE_ACP_WATCH_LOG` | `~/.local/state/zed-opencode-acp-watch/opencode-acp-watch.log` | JSONL-лог обёртки. |
+| `OPENCODE_ACP_WATCH_START_LOCK` | `~/.local/state/zed-opencode-acp-watch/opencode-acp-start.lock` | Файловый lock для сериализации начального запуска `opencode acp`. |
+| `OPENCODE_ACP_WATCH_START_LOCK_TIMEOUT_SEC` | `15` | Сколько второй старт ждёт startup-lock. |
+| `OPENCODE_ACP_WATCH_START_LOCK_HOLD_SEC` | `5` | Сколько первый старт держит lock, пока OpenCode инициализируется. |
 | `OPENCODE_ACP_WATCH_HOLD` | `0` | Неблокирующий режим. Старый режим удержания можно включить через `1`. |
 | `OPENCODE_ACP_WATCH_POLL_SEC` | `2` | Частота опроса, когда активность видна. |
 | `OPENCODE_ACP_WATCH_ACTIVE_WINDOW_SEC` | `1800` | Окно для активных `running`/`pending` tools и незавершённых assistant messages. |
