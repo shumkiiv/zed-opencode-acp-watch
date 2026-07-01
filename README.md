@@ -88,6 +88,7 @@ Restart the Zed/OpenCode agent session after changing the wrapper or Zed setting
 | `OPENCODE_ACP_WATCH_STATUS_RECENT_WINDOW_SEC` | `120` | Window for recent descendant session/part activity. |
 | `OPENCODE_ACP_WATCH_STATUS_MAX_SEC` | same as active window | Maximum lifetime of a status monitor for one prompt. |
 | `OPENCODE_ACP_WATCH_STATUS_IDLE_POLL_SEC` | `10` | Poll interval after startup when no activity is currently visible. |
+| `OPENCODE_ACP_WATCH_CANCEL_GRACE_SEC` | `30` | How long to keep status alive after `session/cancel` while checking whether OpenCode continues writing session activity. |
 
 ## Diagnostics
 
@@ -104,5 +105,7 @@ This wrapper does not modify OpenCode sessions, kill processes, or edit projects
 The preflight status cannot see the model provider's external queue. It gives a local estimate from `/proc/loadavg`, `/proc/meminfo`, the process list, and one short read-only query against OpenCode's SQLite database. The estimate also uses the number of parallel ACP sessions and open todos in the current session tree. In normal use this is cheaper than a regular heartbeat poll; if the database is busy, the query is capped by `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC`.
 
 ETA is intentionally coarse: `до 1 мин`, `1-3 мин`, `3-10 мин`, or `10+ мин`. The default prediction is conservative after local calibration: a clean local machine starts at `1-3 мин`; active tools, open todos, or several ACP sessions move the estimate to `3-10 мин` or `10+ мин`. After completion, cancellation, timeout, or monitor shutdown, one JSONL row is appended to `OPENCODE_ACP_WATCH_ETA_STATS_PATH` with `eta_label`, actual `elapsed_sec`, outcome, `eta_hit`, and the resource snapshot. That history is meant for tuning thresholds to a specific machine and project mix.
+
+After Zed sends `session/cancel`, the status monitor does not immediately close the synthetic status. It waits `OPENCODE_ACP_WATCH_CANCEL_GRACE_SEC` and checks whether OpenCode wrote newer session, part, or message activity after that grace window. If work keeps moving, the status remains `in_progress`; otherwise it closes as cancelled.
 
 Old `running` rows in OpenCode's database can be stale. Treat a task as live only when its session, child sessions, parts, WAL file, or OpenCode log keep updating.

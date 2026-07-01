@@ -36,6 +36,7 @@ STATUS_RECENT_WINDOW_SEC = int(os.environ.get("OPENCODE_ACP_WATCH_STATUS_RECENT_
 STATUS_START_GRACE_SEC = float(
     os.environ.get("OPENCODE_ACP_WATCH_STATUS_START_GRACE_SEC", str(max(LATE_GRACE_SEC, COMPLEX_PROMPT_SEC)))
 )
+CANCEL_GRACE_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_CANCEL_GRACE_SEC", "30"))
 PREFLIGHT_ENABLED = os.environ.get("OPENCODE_ACP_WATCH_PREFLIGHT", "1") not in ("0", "false", "False")
 PREFLIGHT_DB_TIMEOUT_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC", "0.5"))
 ETA_STATS_ENABLED = os.environ.get("OPENCODE_ACP_WATCH_ETA_STATS", "1") not in ("0", "false", "False")
@@ -52,6 +53,7 @@ status_lock = threading.Lock()
 eta_stats_lock = threading.Lock()
 pending_prompt_by_id = {}
 cancelled_sessions = set()
+cancelled_session_ms = {}
 held_threads = []
 status_sessions = set()
 shutdown = threading.Event()
@@ -268,6 +270,22 @@ def descendant_activity_summary(session_id):
             limit 1
           ) as latest_session_updated,
           (
+            select max(updated)
+            from (
+              select max(s.time_updated) as updated
+              from session s
+              join tree t on t.id = s.id
+              union all
+              select max(p.time_updated) as updated
+              from part p
+              join tree t on t.id = p.session_id
+              union all
+              select max(m.time_updated) as updated
+              from message m
+              join tree t on t.id = m.session_id
+            )
+          ) as latest_activity_updated,
+          (
             select json_extract(p.data, '$.tool')
             from part p
             join tree t on t.id = p.session_id
@@ -299,6 +317,8 @@ def descendant_activity_summary(session_id):
                 "recent_parts": 0,
                 "latest_title": "",
                 "latest_age": None,
+                "latest_session_updated": None,
+                "latest_activity_updated": None,
                 "latest_tool": "",
                 "latest_tool_status": "",
             }
@@ -306,8 +326,9 @@ def descendant_activity_summary(session_id):
         active_messages = int(row[1] or 0)
         recent_sessions = int(row[2] or 0)
         recent_parts = int(row[3] or 0)
-        latest_updated = int(row[5] or 0)
-        latest_age = max(0, int((now_ms() - latest_updated) / 1000)) if latest_updated else None
+        latest_session_updated = int(row[5] or 0)
+        latest_activity_updated = int(row[6] or latest_session_updated or 0)
+        latest_age = max(0, int((now_ms() - latest_activity_updated) / 1000)) if latest_activity_updated else None
         return {
             "active": active_tools + active_messages,
             "recent": recent_sessions + recent_parts,
@@ -317,8 +338,10 @@ def descendant_activity_summary(session_id):
             "recent_parts": recent_parts,
             "latest_title": row[4] or "",
             "latest_age": latest_age,
-            "latest_tool": row[6] or "",
-            "latest_tool_status": row[7] or "",
+            "latest_session_updated": latest_session_updated or None,
+            "latest_activity_updated": latest_activity_updated or None,
+            "latest_tool": row[7] or "",
+            "latest_tool_status": row[8] or "",
         }
     except Exception as exc:
         log("db_activity_error", session_id=session_id, error=str(exc))
@@ -331,6 +354,8 @@ def descendant_activity_summary(session_id):
             "recent_parts": 0,
             "latest_title": "",
             "latest_age": None,
+            "latest_session_updated": None,
+            "latest_activity_updated": None,
             "latest_tool": "",
             "latest_tool_status": "",
         }
@@ -891,17 +916,76 @@ def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=F
 
     try:
         while not shutdown.is_set():
-            if session_id in cancelled_sessions:
-                exit_reason = "cancelled"
-                log("status_monitor_cancelled", session_id=session_id)
-                break
-
             elapsed = time.monotonic() - started
             summary = descendant_activity_summary(session_id)
             active = int(summary.get("active", 0))
             recent = int(summary.get("recent", 0))
             has_activity = active > 0 or recent > 0
             now = time.monotonic()
+
+            if session_id in cancelled_sessions:
+                cancel_ms = cancelled_session_ms.get(session_id) or now_ms()
+                cancel_age_sec = max(0.0, (now_ms() - cancel_ms) / 1000)
+                latest_activity_updated = int(summary.get("latest_activity_updated") or 0)
+                continuation_cutoff = cancel_ms + int(CANCEL_GRACE_SEC * 1000)
+                continued_after_cancel = latest_activity_updated >= continuation_cutoff
+
+                if has_activity:
+                    saw_activity = True
+
+                if not continued_after_cancel and cancel_age_sec < CANCEL_GRACE_SEC:
+                    if now - last_heartbeat >= max(2.0, POLL_SEC * 2):
+                        last_heartbeat = now
+                        remaining = max(0, int(CANCEL_GRACE_SEC - cancel_age_sec))
+                        title = f"OpenCode: проверяю продолжение работы после отмены ({remaining} с)"
+                        if sent_status or status_announced:
+                            send_tool_call_update(session_id, "in_progress", title)
+                        else:
+                            send_tool_call(session_id, active, title)
+                            status_announced = True
+                        sent_status = True
+                        log(
+                            "status_monitor_cancel_grace",
+                            session_id=session_id,
+                            active=active,
+                            recent=recent,
+                            cancel_age=round(cancel_age_sec, 2),
+                            latest_activity_updated=latest_activity_updated,
+                        )
+                    time.sleep(POLL_SEC)
+                    continue
+
+                if continued_after_cancel:
+                    cancelled_sessions.discard(session_id)
+                    cancelled_session_ms.pop(session_id, None)
+                    quiet_since = None
+                    title = "OpenCode продолжает работу после отмены/reconnect"
+                    if now - last_heartbeat >= max(2.0, POLL_SEC * 2):
+                        last_heartbeat = now
+                        if sent_status or status_announced:
+                            send_tool_call_update(session_id, "in_progress", title)
+                        else:
+                            send_tool_call(session_id, active, title)
+                            status_announced = True
+                        sent_status = True
+                    log(
+                        "status_monitor_cancel_ignored_active",
+                        session_id=session_id,
+                        active=active,
+                        recent=recent,
+                        cancel_age=round(cancel_age_sec, 2),
+                        latest_activity_updated=latest_activity_updated,
+                    )
+                else:
+                    exit_reason = "cancelled"
+                    log(
+                        "status_monitor_cancelled",
+                        session_id=session_id,
+                        cancel_age=round(cancel_age_sec, 2),
+                        active=active,
+                        recent=recent,
+                    )
+                    break
 
             if has_activity:
                 saw_activity = True
@@ -1027,6 +1111,7 @@ def forward_client_to_agent(agent):
                 session_id = extract_session_id_from_prompt(message)
                 if session_id:
                     cancelled_sessions.discard(session_id)
+                    cancelled_session_ms.pop(session_id, None)
                     prompt_start_ms = now_ms()
                     pending_prompt_by_id[rid] = {
                         "session_id": session_id,
@@ -1039,6 +1124,7 @@ def forward_client_to_agent(agent):
                 session_id = extract_session_id_from_cancel(message)
                 if session_id:
                     cancelled_sessions.add(session_id)
+                    cancelled_session_ms[session_id] = now_ms()
                     log("cancel_request", session_id=session_id)
             else:
                 log("client_message", request_id=rid, method=method)
