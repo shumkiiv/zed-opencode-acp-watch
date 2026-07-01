@@ -36,6 +36,8 @@ STATUS_RECENT_WINDOW_SEC = int(os.environ.get("OPENCODE_ACP_WATCH_STATUS_RECENT_
 STATUS_START_GRACE_SEC = float(
     os.environ.get("OPENCODE_ACP_WATCH_STATUS_START_GRACE_SEC", str(max(LATE_GRACE_SEC, COMPLEX_PROMPT_SEC)))
 )
+PREFLIGHT_ENABLED = os.environ.get("OPENCODE_ACP_WATCH_PREFLIGHT", "1") not in ("0", "false", "False")
+PREFLIGHT_DB_TIMEOUT_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC", "0.5"))
 HOLD_RESPONSES = os.environ.get("OPENCODE_ACP_WATCH_HOLD", "0") not in ("0", "false", "False")
 
 
@@ -341,6 +343,176 @@ def activity_title(summary):
     )
 
 
+def format_gib_from_kb(value_kb):
+    if value_kb is None:
+        return "?"
+    value_gib = value_kb / 1024 / 1024
+    if value_gib < 10:
+        return f"{value_gib:.1f}G"
+    return f"{value_gib:.0f}G"
+
+
+def read_load_summary():
+    try:
+        with open("/proc/loadavg", "r", encoding="utf-8") as fh:
+            load1 = float(fh.read().split()[0])
+    except Exception:
+        load1 = None
+    cpus = os.cpu_count() or 1
+    return load1, cpus
+
+
+def read_memory_summary():
+    values = {}
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+            for line in fh:
+                key, raw_value = line.split(":", 1)
+                parts = raw_value.strip().split()
+                if parts:
+                    values[key] = int(parts[0])
+    except Exception as exc:
+        log("preflight_meminfo_error", error=str(exc))
+    mem_available = values.get("MemAvailable")
+    swap_total = values.get("SwapTotal")
+    swap_free = values.get("SwapFree")
+    swap_used = None
+    if swap_total is not None and swap_free is not None:
+        swap_used = max(0, swap_total - swap_free)
+    return mem_available, swap_used, swap_total
+
+
+def count_opencode_acp_processes():
+    count = 0
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                raw = Path("/proc") / entry / "cmdline"
+                parts = raw.read_bytes().split(b"\0")
+            except Exception:
+                continue
+            if not parts or not parts[0]:
+                continue
+            executable = os.path.basename(parts[0].decode("utf-8", "ignore"))
+            if executable == "opencode" and any(part == b"acp" for part in parts[1:]):
+                count += 1
+    except Exception as exc:
+        log("preflight_process_scan_error", error=str(exc))
+    return count
+
+
+def preflight_queue_summary(session_id):
+    active_cutoff = now_ms() - ACTIVE_WINDOW_SEC * 1000
+    recent_cutoff = now_ms() - STATUS_RECENT_WINDOW_SEC * 1000
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=PREFLIGHT_DB_TIMEOUT_SEC)
+        conn.execute("pragma query_only=ON")
+        query = """
+        with recursive tree(id) as (
+          values(?)
+          union
+          select s.id from session s join tree t on s.parent_id = t.id
+        )
+        select
+          (
+            select count(*)
+            from part p
+            join tree t on t.id = p.session_id
+            where json_extract(p.data, '$.type') = 'tool'
+              and json_extract(p.data, '$.state.status') in ('pending', 'running')
+              and p.time_updated >= ?
+          ) as active_tools,
+          (
+            select count(*)
+            from message m
+            join tree t on t.id = m.session_id
+            where json_extract(m.data, '$.role') = 'assistant'
+              and json_extract(m.data, '$.time.completed') is null
+              and m.time_updated >= ?
+          ) as active_messages,
+          (
+            select count(*)
+            from session s
+            join tree t on t.id = s.id
+            where s.time_updated >= ?
+          ) as recent_sessions,
+          (
+            select count(*)
+            from part p
+            join tree t on t.id = p.session_id
+            where p.time_updated >= ?
+          ) as recent_parts
+        """
+        row = conn.execute(
+            query,
+            (session_id, active_cutoff, active_cutoff, recent_cutoff, recent_cutoff),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return {"active_tools": 0, "active_messages": 0, "recent": 0}
+        return {
+            "active_tools": int(row[0] or 0),
+            "active_messages": int(row[1] or 0),
+            "recent": int(row[2] or 0) + int(row[3] or 0),
+        }
+    except Exception as exc:
+        log("preflight_queue_error", session_id=session_id, error=str(exc))
+        return {"active_tools": None, "active_messages": None, "recent": None}
+
+
+def preflight_hint(load1, cpus, mem_available, swap_used, queue):
+    active = int(queue.get("active_tools") or 0) + int(queue.get("active_messages") or 0)
+    if active > 0:
+        return "session busy"
+    if load1 is not None and cpus and load1 >= cpus * 0.9:
+        return "CPU busy"
+    if mem_available is not None and mem_available < 2 * 1024 * 1024:
+        return "low RAM"
+    if swap_used is not None and swap_used > 1024 * 1024 and mem_available is not None and mem_available < 4 * 1024 * 1024:
+        return "memory pressure"
+    recent = queue.get("recent")
+    if isinstance(recent, int) and recent > 0:
+        return "activity nearby"
+    return "start likely soon"
+
+
+def build_preflight_title(session_id):
+    load1, cpus = read_load_summary()
+    mem_available, swap_used, swap_total = read_memory_summary()
+    queue_summary = preflight_queue_summary(session_id)
+    acp_count = count_opencode_acp_processes()
+    load_text = f"{load1:.1f}/{cpus}" if load1 is not None else f"?/{cpus}"
+    ram_text = format_gib_from_kb(mem_available)
+    if swap_used is None or swap_total is None:
+        swap_text = "?"
+    else:
+        swap_text = f"{format_gib_from_kb(swap_used)}/{format_gib_from_kb(swap_total)}"
+    if queue_summary.get("active_tools") is None:
+        queue_text = "unknown"
+    else:
+        queue_text = f"tools {queue_summary.get('active_tools', 0)}, msg {queue_summary.get('active_messages', 0)}"
+    hint = preflight_hint(load1, cpus, mem_available, swap_used, queue_summary)
+    return (
+        f"OpenCode preflight: load {load_text}, RAM {ram_text} free, "
+        f"swap {swap_text}, ACP {acp_count}, queue {queue_text}; {hint}"
+    )
+
+
+def send_preflight_status(session_id):
+    if not PREFLIGHT_ENABLED:
+        return False
+    try:
+        title = build_preflight_title(session_id)
+        send_tool_call(session_id, 0, title)
+        log("preflight_status", session_id=session_id, title=title)
+        return True
+    except Exception as exc:
+        log("preflight_status_error", session_id=session_id, error=str(exc))
+        return False
+
+
 def missing_final_report_title(session_id, since_ms):
     cutoff = since_ms or (now_ms() - ACTIVE_WINDOW_SEC * 1000)
     try:
@@ -498,14 +670,20 @@ def hold_response_until_idle(raw, response_id, session_id, prompt_start_ms):
     write_line(raw)
 
 
-def status_monitor_until_idle(session_id, prompt_start_ms):
+def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=False):
     started = time.monotonic()
-    sent_status = False
-    status_announced = False
+    sent_status = bool(initial_status_sent)
+    status_announced = bool(initial_status_sent)
+    saw_activity = False
     quiet_since = None
     last_heartbeat = 0.0
     exit_reason = "shutdown"
-    log("status_monitor_begin", session_id=session_id, prompt_start_ms=prompt_start_ms)
+    log(
+        "status_monitor_begin",
+        session_id=session_id,
+        prompt_start_ms=prompt_start_ms,
+        initial_status_sent=initial_status_sent,
+    )
 
     try:
         while not shutdown.is_set():
@@ -522,6 +700,7 @@ def status_monitor_until_idle(session_id, prompt_start_ms):
             now = time.monotonic()
 
             if has_activity:
+                saw_activity = True
                 quiet_since = None
                 if now - last_heartbeat >= max(2.0, POLL_SEC * 2):
                     last_heartbeat = now
@@ -548,7 +727,7 @@ def status_monitor_until_idle(session_id, prompt_start_ms):
                 if quiet_since is None:
                     quiet_since = now
                 idle_elapsed = now - quiet_since
-                if sent_status and idle_elapsed >= IDLE_GRACE_SEC:
+                if sent_status and saw_activity and idle_elapsed >= IDLE_GRACE_SEC:
                     idle_title = missing_final_report_title(session_id, prompt_start_ms)
                     log(
                         "status_monitor_idle",
@@ -595,15 +774,17 @@ def status_monitor_until_idle(session_id, prompt_start_ms):
 def start_status_monitor(session_id, prompt_start_ms):
     with status_lock:
         if session_id in status_sessions:
-            return
+            return False
         status_sessions.add(session_id)
+    initial_status_sent = send_preflight_status(session_id)
     thread = threading.Thread(
         target=status_monitor_until_idle,
-        args=(session_id, prompt_start_ms),
+        args=(session_id, prompt_start_ms, initial_status_sent),
         daemon=True,
         name=f"status-{session_id}",
     )
     thread.start()
+    return True
 
 
 def forward_client_to_agent(agent):
