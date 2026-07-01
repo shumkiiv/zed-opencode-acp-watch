@@ -12,7 +12,7 @@ Russian documentation: [README.ru.md](README.ru.md)
 - Keeps responses non-blocking by default with `OPENCODE_ACP_WATCH_HOLD=0`.
 - Watches OpenCode's SQLite database for real activity.
 - Tracks recursive child sessions, not only the visible parent session.
-- Shows a lightweight Russian preflight status before each prompt: CPU/load average, available RAM, swap, `opencode acp` process count, the current session's local queue, and a rough ETA.
+- Shows a lightweight Russian preflight status before each prompt: CPU/load average, available RAM, swap, `opencode acp` process count, the current session's local queue, open todos, and a rough ETA.
 - Writes ETA JSONL statistics so predictions can later be compared against actual runtime and tuned.
 - Shows Russian heartbeat updates such as `OpenCode активен: ...` when descendant tools, assistant messages, or recent child session updates are present.
 - Does not inject raw `session.title` into synthetic heartbeat rows: OpenCode child-session titles may be English, but the wrapper keeps them only in logs for diagnostics.
@@ -101,8 +101,8 @@ The script prints recent sessions, running/pending tools, and OpenCode DB/log mt
 
 This wrapper does not modify OpenCode sessions, kill processes, or edit projects. It only observes OpenCode's database and sends ACP status updates to Zed.
 
-The preflight status cannot see the model provider's external queue. It gives a local estimate from `/proc/loadavg`, `/proc/meminfo`, the process list, and one short read-only query against OpenCode's SQLite database. In normal use this is cheaper than a regular heartbeat poll; if the database is busy, the query is capped by `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC`.
+The preflight status cannot see the model provider's external queue. It gives a local estimate from `/proc/loadavg`, `/proc/meminfo`, the process list, and one short read-only query against OpenCode's SQLite database. The estimate also uses the number of parallel ACP sessions and open todos in the current session tree. In normal use this is cheaper than a regular heartbeat poll; if the database is busy, the query is capped by `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC`.
 
-ETA is intentionally coarse: `до 1 мин`, `1-3 мин`, `3-10 мин`, or `10+ мин`. After completion, cancellation, timeout, or monitor shutdown, one JSONL row is appended to `OPENCODE_ACP_WATCH_ETA_STATS_PATH` with `eta_label`, actual `elapsed_sec`, outcome, `eta_hit`, and the resource snapshot. That history is meant for tuning thresholds to a specific machine and project mix.
+ETA is intentionally coarse: `до 1 мин`, `1-3 мин`, `3-10 мин`, or `10+ мин`. The default prediction is conservative after local calibration: a clean local machine starts at `1-3 мин`; active tools, open todos, or several ACP sessions move the estimate to `3-10 мин` or `10+ мин`. After completion, cancellation, timeout, or monitor shutdown, one JSONL row is appended to `OPENCODE_ACP_WATCH_ETA_STATS_PATH` with `eta_label`, actual `elapsed_sec`, outcome, `eta_hit`, and the resource snapshot. That history is meant for tuning thresholds to a specific machine and project mix.
 
 Old `running` rows in OpenCode's database can be stale. Treat a task as live only when its session, child sessions, parts, WAL file, or OpenCode log keep updating.
