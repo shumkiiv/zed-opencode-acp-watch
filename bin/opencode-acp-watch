@@ -581,7 +581,13 @@ def status_monitor_until_idle(session_id, prompt_start_ms):
                 time.sleep(max(POLL_SEC, STATUS_IDLE_POLL_SEC))
     finally:
         if sent_status:
-            log("status_monitor_left_open", session_id=session_id, reason=exit_reason)
+            if exit_reason == "cancelled":
+                send_tool_call_update(session_id, "failed", "OpenCode request cancelled")
+            elif exit_reason == "timeout":
+                send_tool_call_update(session_id, "failed", "OpenCode status monitor timed out")
+            else:
+                send_tool_call_update(session_id, "failed", "OpenCode status monitor stopped")
+            log("status_monitor_closed_failed", session_id=session_id, reason=exit_reason)
         with status_lock:
             status_sessions.discard(session_id)
 

@@ -15,7 +15,7 @@ Russian documentation: [README.ru.md](README.ru.md)
 - Shows heartbeat updates such as `OpenCode active (...)` when descendant tools, assistant messages, or recent child session updates are present.
 - Warns when OpenCode stops after an assistant message with no final text report, for example after a provider interruption or `finish: unknown`.
 - Serializes near-simultaneous ACP startups to reduce `database is locked` failures against OpenCode's SQLite database.
-- Avoids reporting the synthetic heartbeat as `completed` after `session/cancel`, so Zed does not play a misleading "done" signal while work is being restarted.
+- Reports the synthetic heartbeat as `failed` after `session/cancel`, so Zed does not play a misleading "done" signal or leave stale progress visible while work is being restarted.
 - Helps with the common case where a parent task looks stale while `oracle`, `look_at`, `Sisyphus-Junior`, or other child agents are still working.
 
 ## Requirements

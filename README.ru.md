@@ -15,7 +15,7 @@ English documentation: [README.md](README.md)
 - Показывает heartbeat вида `OpenCode active (...)`, если есть активные descendant tools, assistant messages или свежие обновления дочерних сессий.
 - Предупреждает, если OpenCode остановился после assistant-сообщения без финального текстового отчёта, например после provider interruption или `finish: unknown`.
 - Сериализует почти одновременные старты ACP, чтобы снизить риск `database is locked` на SQLite-базе OpenCode.
-- Не помечает синтетический heartbeat как `completed` после `session/cancel`, чтобы Zed не подавал ложный сигнал "готово", пока задача перезапускается.
+- Помечает синтетический heartbeat как `failed` после `session/cancel`, чтобы Zed не подавал ложный сигнал "готово" и не оставлял старый прогресс видимым, пока задача перезапускается.
 - Закрывает частый случай: родительская задача выглядит старой, но `oracle`, `look_at`, `Sisyphus-Junior` или другие дочерние агенты ещё работают.
 
 ## Требования
