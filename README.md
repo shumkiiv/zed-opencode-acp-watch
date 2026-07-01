@@ -19,6 +19,7 @@ Russian documentation: [README.ru.md](README.ru.md)
 - Warns when OpenCode stops after an assistant message with no final text report, for example after a provider interruption or `finish: unknown`.
 - Serializes near-simultaneous ACP startups to reduce `database is locked` failures against OpenCode's SQLite database.
 - Reports the synthetic heartbeat as `failed` after `session/cancel`, so Zed does not play a misleading "done" signal or leave stale progress visible while work is being restarted.
+- Extends the status monitor after `OPENCODE_ACP_WATCH_STATUS_MAX_SEC` when OpenCode's DB still shows activity, so long-running live tasks do not lose their indicator.
 - Helps with the common case where a parent task looks stale while `oracle`, `look_at`, `Sisyphus-Junior`, or other child agents are still working.
 
 ## Requirements

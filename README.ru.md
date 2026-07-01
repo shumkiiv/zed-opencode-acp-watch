@@ -19,6 +19,7 @@ English documentation: [README.md](README.md)
 - Предупреждает, если OpenCode остановился после assistant-сообщения без финального текстового отчёта, например после provider interruption или `finish: unknown`.
 - Сериализует почти одновременные старты ACP, чтобы снизить риск `database is locked` на SQLite-базе OpenCode.
 - Помечает синтетический heartbeat как `failed` после `session/cancel`, чтобы Zed не подавал ложный сигнал "готово" и не оставлял старый прогресс видимым, пока задача перезапускается.
+- Продлевает status-monitor после `OPENCODE_ACP_WATCH_STATUS_MAX_SEC`, если OpenCode DB всё ещё показывает активность, чтобы длинные живые задачи не теряли индикацию.
 - Закрывает частый случай: родительская задача выглядит старой, но `oracle`, `look_at`, `Sisyphus-Junior` или другие дочерние агенты ещё работают.
 
 ## Требования

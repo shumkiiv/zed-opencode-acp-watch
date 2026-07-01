@@ -903,15 +903,26 @@ def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=F
                     break
 
             if elapsed >= STATUS_MONITOR_MAX_SEC:
-                exit_reason = "timeout"
-                log(
-                    "status_monitor_timeout",
-                    session_id=session_id,
-                    active=active,
-                    recent=recent,
-                    elapsed=round(elapsed, 2),
-                )
-                break
+                if has_activity:
+                    log(
+                        "status_monitor_extended",
+                        session_id=session_id,
+                        active=active,
+                        recent=recent,
+                        elapsed=round(elapsed, 2),
+                    )
+                    started = time.monotonic()
+                    quiet_since = None
+                else:
+                    exit_reason = "timeout"
+                    log(
+                        "status_monitor_timeout",
+                        session_id=session_id,
+                        active=active,
+                        recent=recent,
+                        elapsed=round(elapsed, 2),
+                    )
+                    break
 
             if sent_status or elapsed < STATUS_START_GRACE_SEC:
                 time.sleep(POLL_SEC)
