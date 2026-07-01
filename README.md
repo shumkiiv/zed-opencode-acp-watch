@@ -14,7 +14,8 @@ Russian documentation: [README.ru.md](README.ru.md)
 - Tracks recursive child sessions, not only the visible parent session.
 - Shows a lightweight Russian preflight status before each prompt: CPU/load average, available RAM, swap, `opencode acp` process count, the current session's local queue, and a rough ETA.
 - Writes ETA JSONL statistics so predictions can later be compared against actual runtime and tuned.
-- Shows heartbeat updates such as `OpenCode active (...)` when descendant tools, assistant messages, or recent child session updates are present.
+- Shows Russian heartbeat updates such as `OpenCode активен: ...` when descendant tools, assistant messages, or recent child session updates are present.
+- Does not inject raw `session.title` into synthetic heartbeat rows: OpenCode child-session titles may be English, but the wrapper keeps them only in logs for diagnostics.
 - Warns when OpenCode stops after an assistant message with no final text report, for example after a provider interruption or `finish: unknown`.
 - Serializes near-simultaneous ACP startups to reduce `database is locked` failures against OpenCode's SQLite database.
 - Reports the synthetic heartbeat as `failed` after `session/cancel`, so Zed does not play a misleading "done" signal or leave stale progress visible while work is being restarted.

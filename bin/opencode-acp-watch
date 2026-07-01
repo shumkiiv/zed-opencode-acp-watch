@@ -337,15 +337,13 @@ def descendant_activity_summary(session_id):
 
 
 def activity_title(summary):
-    latest = summary.get("latest_title") or "session"
-    if len(latest) > 72:
-        latest = latest[:69] + "..."
     latest_age = summary.get("latest_age")
-    age_text = f", latest {latest_age}s ago" if latest_age is not None else ""
+    age_text = f", последнее обновление {latest_age} с назад" if latest_age is not None else ""
     return (
-        "OpenCode active "
-        f"(tools {summary.get('active_tools', 0)}, messages {summary.get('active_messages', 0)}, "
-        f"recent {summary.get('recent', 0)}{age_text}): {latest}"
+        "OpenCode активен: "
+        f"инструменты {summary.get('active_tools', 0)}, "
+        f"сообщения {summary.get('active_messages', 0)}, "
+        f"свежая активность {summary.get('recent', 0)}{age_text}"
     )
 
 
@@ -703,8 +701,8 @@ def missing_final_report_title(session_id, since_ms):
             finish=finish_text,
             age=age,
         )
-        age_text = f", last message {age}s ago" if age is not None else ""
-        return f"OpenCode stopped without final text report (finish {finish_text}{age_text})"
+        age_text = f", последнее сообщение {age} с назад" if age is not None else ""
+        return f"OpenCode остановился без финального текстового отчёта (finish {finish_text}{age_text})"
     except Exception as exc:
         log("missing_final_report_check_error", session_id=session_id, error=str(exc))
         return None
@@ -743,7 +741,7 @@ def send_tool_call(session_id, active, title=None):
             "update": {
                 "sessionUpdate": "tool_call",
                 "toolCallId": "opencode-acp-watch-status",
-                "title": title or f"OpenCode active tools running ({active})",
+                "title": title or f"OpenCode активен: выполняются инструменты ({active})",
                 "kind": "other",
                 "status": "in_progress",
                 "content": [],
@@ -807,7 +805,7 @@ def hold_response_until_idle(raw, response_id, session_id, prompt_start_ms):
         if active > 0 and now - last_heartbeat >= max(2.0, POLL_SEC * 2):
             last_heartbeat = now
             if sent_status:
-                send_tool_call_update(session_id, "in_progress", f"OpenCode background agents running ({active})")
+                send_tool_call_update(session_id, "in_progress", f"OpenCode активен: фоновые агенты выполняются ({active})")
             else:
                 send_tool_call(session_id, active)
                 sent_status = True
@@ -815,7 +813,7 @@ def hold_response_until_idle(raw, response_id, session_id, prompt_start_ms):
         time.sleep(POLL_SEC)
 
     if sent_status:
-        send_tool_call_update(session_id, "completed", "OpenCode background agents settled")
+        send_tool_call_update(session_id, "completed", "OpenCode: фоновые агенты завершили активность")
     write_line(raw)
 
 
@@ -889,7 +887,7 @@ def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=F
                     send_tool_call_update(
                         session_id,
                         "completed",
-                        idle_title or "OpenCode active tools settled",
+                        idle_title or "OpenCode: активные инструменты завершили работу",
                     )
                     write_eta_stats(
                         preflight_sample,
@@ -925,11 +923,11 @@ def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=F
             write_eta_stats(preflight_sample, exit_reason, actual_elapsed, saw_activity)
         if sent_status:
             if exit_reason == "cancelled":
-                send_tool_call_update(session_id, "failed", "OpenCode request cancelled")
+                send_tool_call_update(session_id, "failed", "OpenCode: запрос отменён")
             elif exit_reason == "timeout":
-                send_tool_call_update(session_id, "failed", "OpenCode status monitor timed out")
+                send_tool_call_update(session_id, "failed", "OpenCode: истёк таймаут мониторинга статуса")
             else:
-                send_tool_call_update(session_id, "failed", "OpenCode status monitor stopped")
+                send_tool_call_update(session_id, "failed", "OpenCode: мониторинг статуса остановлен")
             log("status_monitor_closed_failed", session_id=session_id, reason=exit_reason)
         with status_lock:
             status_sessions.discard(session_id)
