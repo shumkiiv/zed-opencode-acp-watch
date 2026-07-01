@@ -38,12 +38,18 @@ STATUS_START_GRACE_SEC = float(
 )
 PREFLIGHT_ENABLED = os.environ.get("OPENCODE_ACP_WATCH_PREFLIGHT", "1") not in ("0", "false", "False")
 PREFLIGHT_DB_TIMEOUT_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC", "0.5"))
+ETA_STATS_ENABLED = os.environ.get("OPENCODE_ACP_WATCH_ETA_STATS", "1") not in ("0", "false", "False")
+ETA_STATS_PATH = os.environ.get(
+    "OPENCODE_ACP_WATCH_ETA_STATS_PATH",
+    str(HOME / ".local/state/zed-opencode-acp-watch/opencode-acp-watch-eta.jsonl"),
+)
 HOLD_RESPONSES = os.environ.get("OPENCODE_ACP_WATCH_HOLD", "0") not in ("0", "false", "False")
 
 
 write_lock = threading.Lock()
 log_lock = threading.Lock()
 status_lock = threading.Lock()
+eta_stats_lock = threading.Lock()
 pending_prompt_by_id = {}
 cancelled_sessions = set()
 held_threads = []
@@ -462,55 +468,198 @@ def preflight_queue_summary(session_id):
         return {"active_tools": None, "active_messages": None, "recent": None}
 
 
-def preflight_hint(load1, cpus, mem_available, swap_used, queue):
-    active = int(queue.get("active_tools") or 0) + int(queue.get("active_messages") or 0)
-    if active > 0:
-        return "session busy"
-    if load1 is not None and cpus and load1 >= cpus * 0.9:
-        return "CPU busy"
-    if mem_available is not None and mem_available < 2 * 1024 * 1024:
-        return "low RAM"
-    if swap_used is not None and swap_used > 1024 * 1024 and mem_available is not None and mem_available < 4 * 1024 * 1024:
-        return "memory pressure"
+def estimate_eta(load1, cpus, mem_available, swap_used, queue):
+    active_tools = int(queue.get("active_tools") or 0)
+    active_messages = int(queue.get("active_messages") or 0)
+    active = active_tools + active_messages
     recent = queue.get("recent")
+    load_ratio = load1 / cpus if load1 is not None and cpus else None
+    low_ram = mem_available is not None and mem_available < 2 * 1024 * 1024
+    memory_pressure = (
+        swap_used is not None
+        and swap_used > 1024 * 1024
+        and mem_available is not None
+        and mem_available < 4 * 1024 * 1024
+    )
+
+    if memory_pressure:
+        return {
+            "eta_label": "10+ мин",
+            "eta_min_sec": 600,
+            "eta_max_sec": None,
+            "eta_reason": "давление по памяти",
+        }
+    if low_ram:
+        return {
+            "eta_label": "10+ мин",
+            "eta_min_sec": 600,
+            "eta_max_sec": None,
+            "eta_reason": "мало свободной RAM",
+        }
+    if active >= 3:
+        return {
+            "eta_label": "10+ мин",
+            "eta_min_sec": 600,
+            "eta_max_sec": None,
+            "eta_reason": "в сессии уже много активных задач",
+        }
+    if active > 0:
+        return {
+            "eta_label": "3-10 мин",
+            "eta_min_sec": 180,
+            "eta_max_sec": 600,
+            "eta_reason": "в сессии уже есть активные задачи",
+        }
+    if load_ratio is not None and load_ratio >= 0.9:
+        return {
+            "eta_label": "3-10 мин",
+            "eta_min_sec": 180,
+            "eta_max_sec": 600,
+            "eta_reason": "CPU сильно занят",
+        }
     if isinstance(recent, int) and recent > 0:
-        return "activity nearby"
-    return "start likely soon"
+        return {
+            "eta_label": "1-3 мин",
+            "eta_min_sec": 60,
+            "eta_max_sec": 180,
+            "eta_reason": "есть свежая активность рядом",
+        }
+    if load_ratio is not None and load_ratio >= 0.5:
+        return {
+            "eta_label": "1-3 мин",
+            "eta_min_sec": 60,
+            "eta_max_sec": 180,
+            "eta_reason": "CPU умеренно занят",
+        }
+    return {
+        "eta_label": "до 1 мин",
+        "eta_min_sec": 0,
+        "eta_max_sec": 60,
+        "eta_reason": "локальные ресурсы свободны",
+    }
 
 
-def build_preflight_title(session_id):
+def build_preflight_sample(session_id, prompt_start_ms):
     load1, cpus = read_load_summary()
     mem_available, swap_used, swap_total = read_memory_summary()
     queue_summary = preflight_queue_summary(session_id)
     acp_count = count_opencode_acp_processes()
-    load_text = f"{load1:.1f}/{cpus}" if load1 is not None else f"?/{cpus}"
+    eta = estimate_eta(load1, cpus, mem_available, swap_used, queue_summary)
+    load_ratio = load1 / cpus if load1 is not None and cpus else None
+    return {
+        "session_id": session_id,
+        "prompt_start_ms": prompt_start_ms,
+        "created_ms": now_ms(),
+        **eta,
+        "features": {
+            "load1": round(load1, 2) if load1 is not None else None,
+            "cpu_count": cpus,
+            "load_ratio": round(load_ratio, 4) if load_ratio is not None else None,
+            "mem_available_kb": mem_available,
+            "swap_used_kb": swap_used,
+            "swap_total_kb": swap_total,
+            "opencode_acp_processes": acp_count,
+            "active_tools": queue_summary.get("active_tools"),
+            "active_messages": queue_summary.get("active_messages"),
+            "recent": queue_summary.get("recent"),
+        },
+    }
+
+
+def build_preflight_title(sample):
+    features = sample.get("features", {})
+    load1 = features.get("load1")
+    cpus = features.get("cpu_count") or "?"
+    mem_available = features.get("mem_available_kb")
+    swap_used = features.get("swap_used_kb")
+    swap_total = features.get("swap_total_kb")
+    acp_count = features.get("opencode_acp_processes")
+    load_text = f"{load1:.1f}/{cpus}" if isinstance(load1, (int, float)) else f"?/{cpus}"
     ram_text = format_gib_from_kb(mem_available)
     if swap_used is None or swap_total is None:
         swap_text = "?"
     else:
         swap_text = f"{format_gib_from_kb(swap_used)}/{format_gib_from_kb(swap_total)}"
-    if queue_summary.get("active_tools") is None:
-        queue_text = "unknown"
+    if features.get("active_tools") is None:
+        queue_text = "неизвестна"
     else:
-        queue_text = f"tools {queue_summary.get('active_tools', 0)}, msg {queue_summary.get('active_messages', 0)}"
-    hint = preflight_hint(load1, cpus, mem_available, swap_used, queue_summary)
+        queue_text = (
+            f"инструменты {features.get('active_tools', 0)}, "
+            f"сообщения {features.get('active_messages', 0)}"
+        )
     return (
-        f"OpenCode preflight: load {load_text}, RAM {ram_text} free, "
-        f"swap {swap_text}, ACP {acp_count}, queue {queue_text}; {hint}"
+        f"OpenCode перед стартом: CPU {load_text}, RAM свободно {ram_text}, "
+        f"swap {swap_text}, ACP {acp_count}, очередь: {queue_text}; "
+        f"оценка {sample.get('eta_label')}, причина: {sample.get('eta_reason')}"
     )
 
 
-def send_preflight_status(session_id):
-    if not PREFLIGHT_ENABLED:
+def eta_hit(sample, elapsed_sec):
+    min_sec = sample.get("eta_min_sec")
+    max_sec = sample.get("eta_max_sec")
+    if min_sec is None:
+        return None
+    if elapsed_sec < min_sec:
         return False
-    try:
-        title = build_preflight_title(session_id)
-        send_tool_call(session_id, 0, title)
-        log("preflight_status", session_id=session_id, title=title)
+    if max_sec is None:
         return True
+    return elapsed_sec <= max_sec
+
+
+def write_eta_stats(sample, outcome, elapsed_sec, saw_activity, extra=None):
+    if not ETA_STATS_ENABLED or not sample:
+        return
+    try:
+        row = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "session_id": sample.get("session_id"),
+            "prompt_start_ms": sample.get("prompt_start_ms"),
+            "outcome": outcome,
+            "elapsed_sec": round(elapsed_sec, 2),
+            "eta_label": sample.get("eta_label"),
+            "eta_min_sec": sample.get("eta_min_sec"),
+            "eta_max_sec": sample.get("eta_max_sec"),
+            "eta_reason": sample.get("eta_reason"),
+            "eta_hit": eta_hit(sample, elapsed_sec),
+            "saw_activity": saw_activity,
+            "features": sample.get("features", {}),
+        }
+        if extra:
+            row["extra"] = extra
+        Path(ETA_STATS_PATH).parent.mkdir(parents=True, exist_ok=True)
+        with eta_stats_lock:
+            with open(ETA_STATS_PATH, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        log(
+            "eta_stats_recorded",
+            session_id=sample.get("session_id"),
+            outcome=outcome,
+            elapsed=round(elapsed_sec, 2),
+            eta=sample.get("eta_label"),
+            hit=row["eta_hit"],
+        )
+    except Exception as exc:
+        log("eta_stats_error", session_id=sample.get("session_id"), error=str(exc))
+
+
+def send_preflight_status(session_id, prompt_start_ms):
+    if not PREFLIGHT_ENABLED:
+        return None
+    try:
+        sample = build_preflight_sample(session_id, prompt_start_ms)
+        title = build_preflight_title(sample)
+        send_tool_call(session_id, 0, title)
+        log(
+            "preflight_status",
+            session_id=session_id,
+            title=title,
+            eta=sample.get("eta_label"),
+            eta_reason=sample.get("eta_reason"),
+        )
+        return sample
     except Exception as exc:
         log("preflight_status_error", session_id=session_id, error=str(exc))
-        return False
+        return None
 
 
 def missing_final_report_title(session_id, since_ms):
@@ -670,11 +819,12 @@ def hold_response_until_idle(raw, response_id, session_id, prompt_start_ms):
     write_line(raw)
 
 
-def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=False):
+def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=False, preflight_sample=None):
     started = time.monotonic()
     sent_status = bool(initial_status_sent)
     status_announced = bool(initial_status_sent)
     saw_activity = False
+    eta_recorded = False
     quiet_since = None
     last_heartbeat = 0.0
     exit_reason = "shutdown"
@@ -729,6 +879,7 @@ def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=F
                 idle_elapsed = now - quiet_since
                 if sent_status and saw_activity and idle_elapsed >= IDLE_GRACE_SEC:
                     idle_title = missing_final_report_title(session_id, prompt_start_ms)
+                    actual_elapsed = max(0.0, (now_ms() - prompt_start_ms) / 1000) if prompt_start_ms else elapsed
                     log(
                         "status_monitor_idle",
                         session_id=session_id,
@@ -740,8 +891,18 @@ def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=F
                         "completed",
                         idle_title or "OpenCode active tools settled",
                     )
+                    write_eta_stats(
+                        preflight_sample,
+                        "completed",
+                        actual_elapsed,
+                        saw_activity,
+                        {"missing_final_report": bool(idle_title)},
+                    )
+                    eta_recorded = True
                     sent_status = False
                     quiet_since = None
+                    exit_reason = "completed"
+                    break
 
             if elapsed >= STATUS_MONITOR_MAX_SEC:
                 exit_reason = "timeout"
@@ -759,6 +920,9 @@ def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=F
             else:
                 time.sleep(max(POLL_SEC, STATUS_IDLE_POLL_SEC))
     finally:
+        if not eta_recorded and preflight_sample:
+            actual_elapsed = max(0.0, (now_ms() - prompt_start_ms) / 1000) if prompt_start_ms else time.monotonic() - started
+            write_eta_stats(preflight_sample, exit_reason, actual_elapsed, saw_activity)
         if sent_status:
             if exit_reason == "cancelled":
                 send_tool_call_update(session_id, "failed", "OpenCode request cancelled")
@@ -776,10 +940,11 @@ def start_status_monitor(session_id, prompt_start_ms):
         if session_id in status_sessions:
             return False
         status_sessions.add(session_id)
-    initial_status_sent = send_preflight_status(session_id)
+    preflight_sample = send_preflight_status(session_id, prompt_start_ms)
+    initial_status_sent = bool(preflight_sample)
     thread = threading.Thread(
         target=status_monitor_until_idle,
-        args=(session_id, prompt_start_ms, initial_status_sent),
+        args=(session_id, prompt_start_ms, initial_status_sent, preflight_sample),
         daemon=True,
         name=f"status-{session_id}",
     )

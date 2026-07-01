@@ -12,7 +12,8 @@ Russian documentation: [README.ru.md](README.ru.md)
 - Keeps responses non-blocking by default with `OPENCODE_ACP_WATCH_HOLD=0`.
 - Watches OpenCode's SQLite database for real activity.
 - Tracks recursive child sessions, not only the visible parent session.
-- Shows a lightweight preflight status before each prompt: load average, available RAM, swap, `opencode acp` process count, and the current session's local queue.
+- Shows a lightweight Russian preflight status before each prompt: CPU/load average, available RAM, swap, `opencode acp` process count, the current session's local queue, and a rough ETA.
+- Writes ETA JSONL statistics so predictions can later be compared against actual runtime and tuned.
 - Shows heartbeat updates such as `OpenCode active (...)` when descendant tools, assistant messages, or recent child session updates are present.
 - Warns when OpenCode stops after an assistant message with no final text report, for example after a provider interruption or `finish: unknown`.
 - Serializes near-simultaneous ACP startups to reduce `database is locked` failures against OpenCode's SQLite database.
@@ -53,6 +54,7 @@ Use an absolute path in `settings.json`; Zed may not expand `~` in command paths
         "OPENCODE_ACP_WATCH_HOLD": "0",
         "OPENCODE_ACP_WATCH_POLL_SEC": "2",
         "OPENCODE_ACP_WATCH_PREFLIGHT": "1",
+        "OPENCODE_ACP_WATCH_ETA_STATS": "1",
         "OPENCODE_ACP_WATCH_ACTIVE_WINDOW_SEC": "1800",
         "OPENCODE_ACP_WATCH_STATUS_RECENT_WINDOW_SEC": "120",
         "OPENCODE_ACP_WATCH_STATUS_IDLE_POLL_SEC": "10"
@@ -78,6 +80,8 @@ Restart the Zed/OpenCode agent session after changing the wrapper or Zed setting
 | `OPENCODE_ACP_WATCH_POLL_SEC` | `2` | Poll interval while activity is visible. |
 | `OPENCODE_ACP_WATCH_PREFLIGHT` | `1` | Show startup resource and local queue status before a prompt. |
 | `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC` | `0.5` | Maximum wait for the short read-only OpenCode DB query used by preflight. |
+| `OPENCODE_ACP_WATCH_ETA_STATS` | `1` | Record ETA accuracy statistics. |
+| `OPENCODE_ACP_WATCH_ETA_STATS_PATH` | `~/.local/state/zed-opencode-acp-watch/opencode-acp-watch-eta.jsonl` | JSONL file with the prediction, actual duration, and whether the duration landed in the predicted range. |
 | `OPENCODE_ACP_WATCH_ACTIVE_WINDOW_SEC` | `1800` | Window for active running/pending tools and unfinished assistant messages. |
 | `OPENCODE_ACP_WATCH_STATUS_RECENT_WINDOW_SEC` | `120` | Window for recent descendant session/part activity. |
 | `OPENCODE_ACP_WATCH_STATUS_MAX_SEC` | same as active window | Maximum lifetime of a status monitor for one prompt. |
@@ -96,5 +100,7 @@ The script prints recent sessions, running/pending tools, and OpenCode DB/log mt
 This wrapper does not modify OpenCode sessions, kill processes, or edit projects. It only observes OpenCode's database and sends ACP status updates to Zed.
 
 The preflight status cannot see the model provider's external queue. It gives a local estimate from `/proc/loadavg`, `/proc/meminfo`, the process list, and one short read-only query against OpenCode's SQLite database. In normal use this is cheaper than a regular heartbeat poll; if the database is busy, the query is capped by `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC`.
+
+ETA is intentionally coarse: `до 1 мин`, `1-3 мин`, `3-10 мин`, or `10+ мин`. After completion, cancellation, timeout, or monitor shutdown, one JSONL row is appended to `OPENCODE_ACP_WATCH_ETA_STATS_PATH` with `eta_label`, actual `elapsed_sec`, outcome, `eta_hit`, and the resource snapshot. That history is meant for tuning thresholds to a specific machine and project mix.
 
 Old `running` rows in OpenCode's database can be stale. Treat a task as live only when its session, child sessions, parts, WAL file, or OpenCode log keep updating.
