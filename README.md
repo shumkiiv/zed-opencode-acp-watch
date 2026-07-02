@@ -18,6 +18,7 @@ Russian documentation: [README.ru.md](README.ru.md)
 - Writes ETA JSONL statistics so predictions can later be compared against actual runtime and tuned.
 - Shows Russian heartbeat updates such as `OpenCode активен: ...` when descendant tools, assistant messages, or recent child session updates are present.
 - Periodically re-announces the synthetic status so Zed can restore the indicator after a reconnect/re-render drops the visible progress row.
+- Marks the status as `failed` when an assistant message stops updating for too long and no tools are active, making a stalled provider/model stream visible.
 - Does not inject raw `session.title` into synthetic heartbeat rows: OpenCode child-session titles may be English, but the wrapper keeps them only in logs for diagnostics.
 - Marks the synthetic status as `failed` when OpenCode stops after an assistant message with no final text report, for example after a provider interruption or `finish: unknown`.
 - Serializes near-simultaneous ACP startups to reduce `database is locked` failures against OpenCode's SQLite database.
@@ -99,6 +100,7 @@ Restart the Zed/OpenCode agent session after changing the wrapper or Zed setting
 | `OPENCODE_ACP_WATCH_STATUS_MAX_SEC` | same as active window | Maximum lifetime of a status monitor for one prompt. |
 | `OPENCODE_ACP_WATCH_STATUS_IDLE_POLL_SEC` | `10` | Poll interval after startup when no activity is currently visible. |
 | `OPENCODE_ACP_WATCH_STATUS_REANNOUNCE_SEC` | `60` | How often live activity re-sends a full synthetic `tool_call` so Zed can restore a lost status row. `0` disables it. |
+| `OPENCODE_ACP_WATCH_STALE_ASSISTANT_SEC` | `600` | Seconds without updates on an unfinished assistant message, with no active tools, before treating the stream as stalled. `0` disables it. |
 | `OPENCODE_ACP_WATCH_CANCEL_GRACE_SEC` | `30` | How long to keep status alive after `session/cancel` while checking whether OpenCode continues writing session activity. |
 
 ## Diagnostics
@@ -122,5 +124,7 @@ The context check does not compact or delete OpenCode history. It only warns tha
 After Zed sends `session/cancel`, the status monitor does not immediately close the synthetic status. It waits `OPENCODE_ACP_WATCH_CANCEL_GRACE_SEC` and checks whether OpenCode wrote newer session, part, or message activity after that grace window. If work keeps moving, the status remains `in_progress`; otherwise it closes as cancelled.
 
 If Zed loses the visible synthetic status row, ordinary `tool_call_update` messages may not be visible. During live activity the wrapper therefore re-sends a full synthetic `tool_call` with the same `toolCallId` every `OPENCODE_ACP_WATCH_STATUS_REANNOUNCE_SEC`.
+
+If the provider/model stream stalls and OpenCode leaves an unfinished assistant message without newer parts/tools, the wrapper closes the synthetic status as `failed` after `OPENCODE_ACP_WATCH_STALE_ASSISTANT_SEC`. It does not send a new prompt automatically and does not cancel the process; the next action stays under user control.
 
 Old `running` rows in OpenCode's database can be stale. Treat a task as live only when its session, child sessions, parts, WAL file, or OpenCode log keep updating.

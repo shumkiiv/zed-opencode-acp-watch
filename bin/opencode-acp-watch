@@ -34,6 +34,7 @@ STATUS_MONITOR_MAX_SEC = int(os.environ.get("OPENCODE_ACP_WATCH_STATUS_MAX_SEC",
 STATUS_IDLE_POLL_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_STATUS_IDLE_POLL_SEC", "10"))
 STATUS_RECENT_WINDOW_SEC = int(os.environ.get("OPENCODE_ACP_WATCH_STATUS_RECENT_WINDOW_SEC", "120"))
 STATUS_REANNOUNCE_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_STATUS_REANNOUNCE_SEC", "60"))
+STALE_ASSISTANT_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_STALE_ASSISTANT_SEC", "600"))
 STATUS_START_GRACE_SEC = float(
     os.environ.get("OPENCODE_ACP_WATCH_STATUS_START_GRACE_SEC", str(max(LATE_GRACE_SEC, COMPLEX_PROMPT_SEC)))
 )
@@ -1022,6 +1023,62 @@ def missing_final_report_title(session_id, since_ms):
         return None
 
 
+def stale_unfinished_assistant_title(session_id, since_ms):
+    if STALE_ASSISTANT_SEC <= 0:
+        return None
+    stale_cutoff = now_ms() - int(STALE_ASSISTANT_SEC * 1000)
+    prompt_cutoff = since_ms or (now_ms() - ACTIVE_WINDOW_SEC * 1000)
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=1)
+        conn.execute("pragma query_only=ON")
+        query = """
+        with recursive tree(id) as (
+          values(?)
+          union
+          select s.id from session s join tree t on s.parent_id = t.id
+        )
+        select
+          m.id,
+          m.session_id,
+          s.title,
+          m.time_updated
+        from message m
+        join session s on s.id = m.session_id
+        join tree t on t.id = m.session_id
+        where json_extract(m.data, '$.role') = 'assistant'
+          and json_extract(m.data, '$.time.completed') is null
+          and m.time_created >= ?
+          and m.time_updated <= ?
+          and not exists (
+            select 1
+            from part p
+            join tree pt on pt.id = p.session_id
+            where json_extract(p.data, '$.type') = 'tool'
+              and json_extract(p.data, '$.state.status') in ('pending', 'running')
+          )
+        order by m.time_updated desc
+        limit 1
+        """
+        row = conn.execute(query, (session_id, prompt_cutoff, stale_cutoff)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        message_id, message_session_id, title, updated = row
+        age = max(0, int((now_ms() - int(updated or 0)) / 1000)) if updated else int(STALE_ASSISTANT_SEC)
+        log(
+            "stale_unfinished_assistant_detected",
+            session_id=session_id,
+            message_id=message_id,
+            message_session_id=message_session_id,
+            title=title or "",
+            age=age,
+        )
+        return f"OpenCode завис: нет обновлений assistant {age} с, активных tools нет"
+    except Exception as exc:
+        log("stale_unfinished_assistant_check_error", session_id=session_id, error=str(exc))
+        return None
+
+
 def recent_descendant_count(session_id, since_ms):
     try:
         conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=1)
@@ -1156,6 +1213,27 @@ def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=F
             recent = int(summary.get("recent", 0))
             has_activity = active > 0 or recent > 0
             now = time.monotonic()
+
+            stale_title = stale_unfinished_assistant_title(session_id, prompt_start_ms)
+            if stale_title:
+                actual_elapsed = max(0.0, (now_ms() - prompt_start_ms) / 1000) if prompt_start_ms else elapsed
+                log(
+                    "status_monitor_stale_assistant",
+                    session_id=session_id,
+                    elapsed=round(elapsed, 2),
+                    active=active,
+                    recent=recent,
+                )
+                if sent_status or status_announced:
+                    send_tool_call_update(session_id, "failed", stale_title)
+                else:
+                    send_tool_call(session_id, active, stale_title)
+                    send_tool_call_update(session_id, "failed", stale_title)
+                write_eta_stats(preflight_sample, "stale_assistant", actual_elapsed, saw_activity)
+                eta_recorded = True
+                sent_status = False
+                exit_reason = "stale_assistant"
+                break
 
             if session_id in cancelled_sessions:
                 cancel_ms = cancelled_session_ms.get(session_id) or now_ms()
