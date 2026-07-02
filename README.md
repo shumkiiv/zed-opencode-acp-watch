@@ -13,6 +13,8 @@ Russian documentation: [README.ru.md](README.ru.md)
 - Watches OpenCode's SQLite database for real activity.
 - Tracks recursive child sessions, not only the visible parent session.
 - Shows a lightweight Russian preflight status before each prompt: CPU/load average, available RAM, swap, `opencode acp` process count, the current session's local queue, open todos, and a rough ETA.
+- Estimates current-session context weight during preflight from total tokens, session-tree age, message count, parts, and tool parts.
+- Warns when it is better to start a fresh session from a short handoff file such as `AI_CONTEXT.md`.
 - Writes ETA JSONL statistics so predictions can later be compared against actual runtime and tuned.
 - Shows Russian heartbeat updates such as `OpenCode активен: ...` when descendant tools, assistant messages, or recent child session updates are present.
 - Does not inject raw `session.title` into synthetic heartbeat rows: OpenCode child-session titles may be English, but the wrapper keeps them only in logs for diagnostics.
@@ -34,7 +36,7 @@ No third-party Python packages are required.
 ## Install
 
 ```sh
-git clone https://github.com/YOUR-USER/zed-opencode-acp-watch.git
+git clone https://github.com/shumkiiv/zed-opencode-acp-watch.git
 cd zed-opencode-acp-watch
 ./scripts/install.sh
 ```
@@ -82,6 +84,13 @@ Restart the Zed/OpenCode agent session after changing the wrapper or Zed setting
 | `OPENCODE_ACP_WATCH_POLL_SEC` | `2` | Poll interval while activity is visible. |
 | `OPENCODE_ACP_WATCH_PREFLIGHT` | `1` | Show startup resource and local queue status before a prompt. |
 | `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC` | `0.5` | Maximum wait for the short read-only OpenCode DB query used by preflight. |
+| `OPENCODE_ACP_WATCH_CONTEXT_WARN` | `1` | Add a preflight warning when the current session is context-heavy. |
+| `OPENCODE_ACP_WATCH_CONTEXT_FILES` | `AI_CONTEXT.md:AGENT_CONTEXT.md:HANDOFF.md:STATUS.md:NEXT_STEPS.md:.ai/context.md:.ai/handoff.md:docs/AI_CONTEXT.md` | Short handoff files the wrapper looks for in the session working directory. |
+| `OPENCODE_ACP_WATCH_CONTEXT_INPUT_WARN_TOKENS` / `OPENCODE_ACP_WATCH_CONTEXT_INPUT_HEAVY_TOKENS` | `3000000` / `8000000` | Total input-token thresholds for the session tree. |
+| `OPENCODE_ACP_WATCH_CONTEXT_PART_WARN_COUNT` / `OPENCODE_ACP_WATCH_CONTEXT_PART_HEAVY_COUNT` | `600` / `1500` | Part-count thresholds for the session tree. |
+| `OPENCODE_ACP_WATCH_CONTEXT_TOOL_WARN_COUNT` / `OPENCODE_ACP_WATCH_CONTEXT_TOOL_HEAVY_COUNT` | `120` / `300` | Tool-part thresholds for the session tree. |
+| `OPENCODE_ACP_WATCH_CONTEXT_MESSAGE_WARN_COUNT` / `OPENCODE_ACP_WATCH_CONTEXT_MESSAGE_HEAVY_COUNT` | `160` / `400` | Message-count thresholds for the session tree. |
+| `OPENCODE_ACP_WATCH_CONTEXT_AGE_WARN_SEC` | `21600` | Session-tree age warning threshold: 6 hours. |
 | `OPENCODE_ACP_WATCH_ETA_STATS` | `1` | Record ETA accuracy statistics. |
 | `OPENCODE_ACP_WATCH_ETA_STATS_PATH` | `~/.local/state/zed-opencode-acp-watch/opencode-acp-watch-eta.jsonl` | JSONL file with the prediction, actual duration, and whether the duration landed in the predicted range. |
 | `OPENCODE_ACP_WATCH_ACTIVE_WINDOW_SEC` | `1800` | Window for active running/pending tools and unfinished assistant messages. |
@@ -105,6 +114,8 @@ This wrapper does not modify OpenCode sessions, kill processes, or edit projects
 The preflight status cannot see the model provider's external queue. It gives a local estimate from `/proc/loadavg`, `/proc/meminfo`, the process list, and one short read-only query against OpenCode's SQLite database. The estimate also uses the number of parallel ACP sessions and open todos in the current session tree. In normal use this is cheaper than a regular heartbeat poll; if the database is busy, the query is capped by `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC`.
 
 ETA is intentionally coarse: `до 1 мин`, `1-3 мин`, `3-10 мин`, or `10+ мин`. The default prediction is conservative after local calibration: a clean local machine starts at `1-3 мин`; active tools, open todos, or several ACP sessions move the estimate to `3-10 мин` or `10+ мин`. After completion, cancellation, timeout, or monitor shutdown, one JSONL row is appended to `OPENCODE_ACP_WATCH_ETA_STATS_PATH` with `eta_label`, actual `elapsed_sec`, outcome, `eta_hit`, and the resource snapshot. That history is meant for tuning thresholds to a specific machine and project mix.
+
+The context check does not compact or delete OpenCode history. It only warns that the current session should be wrapped up, a short handoff file should be updated, and work should continue in a fresh session. When the working directory contains `AI_CONTEXT.md` or another file from `OPENCODE_ACP_WATCH_CONTEXT_FILES`, the wrapper includes that file name in the warning.
 
 After Zed sends `session/cancel`, the status monitor does not immediately close the synthetic status. It waits `OPENCODE_ACP_WATCH_CANCEL_GRACE_SEC` and checks whether OpenCode wrote newer session, part, or message activity after that grace window. If work keeps moving, the status remains `in_progress`; otherwise it closes as cancelled.
 

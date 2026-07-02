@@ -45,6 +45,24 @@ ETA_STATS_PATH = os.environ.get(
     str(HOME / ".local/state/zed-opencode-acp-watch/opencode-acp-watch-eta.jsonl"),
 )
 HOLD_RESPONSES = os.environ.get("OPENCODE_ACP_WATCH_HOLD", "0") not in ("0", "false", "False")
+CONTEXT_WARN_ENABLED = os.environ.get("OPENCODE_ACP_WATCH_CONTEXT_WARN", "1") not in ("0", "false", "False")
+CONTEXT_INPUT_WARN_TOKENS = int(os.environ.get("OPENCODE_ACP_WATCH_CONTEXT_INPUT_WARN_TOKENS", "3000000"))
+CONTEXT_INPUT_HEAVY_TOKENS = int(os.environ.get("OPENCODE_ACP_WATCH_CONTEXT_INPUT_HEAVY_TOKENS", "8000000"))
+CONTEXT_MESSAGE_WARN_COUNT = int(os.environ.get("OPENCODE_ACP_WATCH_CONTEXT_MESSAGE_WARN_COUNT", "160"))
+CONTEXT_MESSAGE_HEAVY_COUNT = int(os.environ.get("OPENCODE_ACP_WATCH_CONTEXT_MESSAGE_HEAVY_COUNT", "400"))
+CONTEXT_PART_WARN_COUNT = int(os.environ.get("OPENCODE_ACP_WATCH_CONTEXT_PART_WARN_COUNT", "600"))
+CONTEXT_PART_HEAVY_COUNT = int(os.environ.get("OPENCODE_ACP_WATCH_CONTEXT_PART_HEAVY_COUNT", "1500"))
+CONTEXT_TOOL_WARN_COUNT = int(os.environ.get("OPENCODE_ACP_WATCH_CONTEXT_TOOL_WARN_COUNT", "120"))
+CONTEXT_TOOL_HEAVY_COUNT = int(os.environ.get("OPENCODE_ACP_WATCH_CONTEXT_TOOL_HEAVY_COUNT", "300"))
+CONTEXT_AGE_WARN_SEC = int(os.environ.get("OPENCODE_ACP_WATCH_CONTEXT_AGE_WARN_SEC", str(6 * 60 * 60)))
+CONTEXT_HANDOFF_FILES = tuple(
+    item.strip()
+    for item in os.environ.get(
+        "OPENCODE_ACP_WATCH_CONTEXT_FILES",
+        "AI_CONTEXT.md:AGENT_CONTEXT.md:HANDOFF.md:STATUS.md:NEXT_STEPS.md:.ai/context.md:.ai/handoff.md:docs/AI_CONTEXT.md",
+    ).split(":")
+    if item.strip()
+)
 
 
 write_lock = threading.Lock()
@@ -381,6 +399,28 @@ def format_gib_from_kb(value_kb):
     return f"{value_gib:.0f}G"
 
 
+def format_compact_count(value):
+    value = int(value or 0)
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 10_000:
+        return f"{value / 1_000:.0f}K"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(value)
+
+
+def format_duration_sec(value):
+    value = int(value or 0)
+    if value >= 48 * 60 * 60:
+        return f"{value / 86400:.0f} д"
+    if value >= 60 * 60:
+        return f"{value / 3600:.0f} ч"
+    if value >= 60:
+        return f"{value / 60:.0f} мин"
+    return f"{value} с"
+
+
 def read_load_summary():
     try:
         with open("/proc/loadavg", "r", encoding="utf-8") as fh:
@@ -499,7 +539,158 @@ def preflight_queue_summary(session_id):
         return {"active_tools": None, "active_messages": None, "recent": None, "open_todos": None}
 
 
-def estimate_eta(load1, cpus, mem_available, swap_used, acp_count, queue):
+def find_handoff_file(directory):
+    if not directory:
+        return None
+    try:
+        base = Path(directory)
+        for relative_path in CONTEXT_HANDOFF_FILES:
+            candidate = base / relative_path
+            if candidate.is_file():
+                try:
+                    size_bytes = candidate.stat().st_size
+                except Exception:
+                    size_bytes = None
+                return {
+                    "path": str(candidate),
+                    "relative_path": relative_path,
+                    "size_bytes": size_bytes,
+                }
+    except Exception as exc:
+        log("preflight_context_file_error", directory=directory, error=str(exc))
+    return None
+
+
+def context_risk(summary):
+    heavy_reasons = []
+    warn_reasons = []
+
+    input_tokens = int(summary.get("tokens_input") or 0)
+    message_count = int(summary.get("message_count") or 0)
+    part_count = int(summary.get("part_count") or 0)
+    tool_part_count = int(summary.get("tool_part_count") or 0)
+    age_sec = int(summary.get("age_sec") or 0)
+
+    if input_tokens >= CONTEXT_INPUT_HEAVY_TOKENS:
+        heavy_reasons.append(f"input {format_compact_count(input_tokens)}")
+    elif input_tokens >= CONTEXT_INPUT_WARN_TOKENS:
+        warn_reasons.append(f"input {format_compact_count(input_tokens)}")
+
+    if part_count >= CONTEXT_PART_HEAVY_COUNT:
+        heavy_reasons.append(f"частей {format_compact_count(part_count)}")
+    elif part_count >= CONTEXT_PART_WARN_COUNT:
+        warn_reasons.append(f"частей {format_compact_count(part_count)}")
+
+    if tool_part_count >= CONTEXT_TOOL_HEAVY_COUNT:
+        heavy_reasons.append(f"инструментов {format_compact_count(tool_part_count)}")
+    elif tool_part_count >= CONTEXT_TOOL_WARN_COUNT:
+        warn_reasons.append(f"инструментов {format_compact_count(tool_part_count)}")
+
+    if message_count >= CONTEXT_MESSAGE_HEAVY_COUNT:
+        heavy_reasons.append(f"сообщений {format_compact_count(message_count)}")
+    elif message_count >= CONTEXT_MESSAGE_WARN_COUNT:
+        warn_reasons.append(f"сообщений {format_compact_count(message_count)}")
+
+    if age_sec >= CONTEXT_AGE_WARN_SEC:
+        warn_reasons.append(f"возраст {format_duration_sec(age_sec)}")
+
+    if heavy_reasons:
+        return "heavy", ", ".join(heavy_reasons[:2])
+    if warn_reasons:
+        return "watch", ", ".join(warn_reasons[:2])
+    return "ok", ""
+
+
+def preflight_context_summary(session_id):
+    if not CONTEXT_WARN_ENABLED:
+        return {"risk": "disabled"}
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=PREFLIGHT_DB_TIMEOUT_SEC)
+        conn.execute("pragma query_only=ON")
+        query = """
+        with recursive tree(id) as (
+          values(?)
+          union
+          select s.id from session s join tree t on s.parent_id = t.id
+        ),
+        root as (
+          select directory from session where id = ?
+        )
+        select
+          (select directory from root) as directory,
+          min(s.time_created) as created,
+          max(s.time_updated) as updated,
+          count(*) as session_count,
+          coalesce(sum(s.tokens_input), 0) as tokens_input,
+          coalesce(sum(s.tokens_output), 0) as tokens_output,
+          coalesce(sum(s.tokens_reasoning), 0) as tokens_reasoning,
+          coalesce(sum(s.tokens_cache_read), 0) as tokens_cache_read,
+          coalesce(sum(s.tokens_cache_write), 0) as tokens_cache_write,
+          (
+            select count(*)
+            from message m
+            join tree t on t.id = m.session_id
+          ) as message_count,
+          (
+            select count(*)
+            from part p
+            join tree t on t.id = p.session_id
+          ) as part_count,
+          (
+            select count(*)
+            from part p
+            join tree t on t.id = p.session_id
+            where json_extract(p.data, '$.type') = 'tool'
+          ) as tool_part_count
+        from session s
+        join tree t on t.id = s.id
+        """
+        row = conn.execute(query, (session_id, session_id)).fetchone()
+        conn.close()
+        if not row:
+            return {"risk": "unknown"}
+        (
+            directory,
+            created,
+            updated,
+            session_count,
+            tokens_input,
+            tokens_output,
+            tokens_reasoning,
+            tokens_cache_read,
+            tokens_cache_write,
+            message_count,
+            part_count,
+            tool_part_count,
+        ) = row
+        age_sec = max(0, int((now_ms() - int(created or 0)) / 1000)) if created else 0
+        handoff = find_handoff_file(directory)
+        summary = {
+            "directory": directory,
+            "created_ms": int(created or 0),
+            "updated_ms": int(updated or 0),
+            "age_sec": age_sec,
+            "session_count": int(session_count or 0),
+            "tokens_input": int(tokens_input or 0),
+            "tokens_output": int(tokens_output or 0),
+            "tokens_reasoning": int(tokens_reasoning or 0),
+            "tokens_cache_read": int(tokens_cache_read or 0),
+            "tokens_cache_write": int(tokens_cache_write or 0),
+            "message_count": int(message_count or 0),
+            "part_count": int(part_count or 0),
+            "tool_part_count": int(tool_part_count or 0),
+            "handoff_file": handoff,
+        }
+        risk, reason = context_risk(summary)
+        summary["risk"] = risk
+        summary["reason"] = reason
+        return summary
+    except Exception as exc:
+        log("preflight_context_error", session_id=session_id, error=str(exc))
+        return {"risk": "unknown", "error": str(exc)}
+
+
+def estimate_eta(load1, cpus, mem_available, swap_used, acp_count, queue, context):
     queue_unknown = queue.get("active_tools") is None or queue.get("active_messages") is None
     active_tools = int(queue.get("active_tools") or 0)
     active_messages = int(queue.get("active_messages") or 0)
@@ -516,6 +707,7 @@ def estimate_eta(load1, cpus, mem_available, swap_used, acp_count, queue):
         and mem_available is not None
         and mem_available < 4 * 1024 * 1024
     )
+    context_state = context.get("risk") if isinstance(context, dict) else None
 
     if memory_pressure:
         return {
@@ -530,6 +722,13 @@ def estimate_eta(load1, cpus, mem_available, swap_used, acp_count, queue):
             "eta_min_sec": 600,
             "eta_max_sec": None,
             "eta_reason": "мало свободной RAM",
+        }
+    if context_state == "heavy":
+        return {
+            "eta_label": "10+ мин",
+            "eta_min_sec": 600,
+            "eta_max_sec": None,
+            "eta_reason": "тяжёлый контекст сессии",
         }
     if active >= 3:
         return {
@@ -565,6 +764,13 @@ def estimate_eta(load1, cpus, mem_available, swap_used, acp_count, queue):
             "eta_min_sec": 180,
             "eta_max_sec": 600,
             "eta_reason": "в сессии есть очередь todo",
+        }
+    if context_state == "watch":
+        return {
+            "eta_label": "3-10 мин",
+            "eta_min_sec": 180,
+            "eta_max_sec": 600,
+            "eta_reason": "контекст сессии растёт",
         }
     if acp_count >= 3:
         return {
@@ -621,7 +827,8 @@ def build_preflight_sample(session_id, prompt_start_ms):
     mem_available, swap_used, swap_total = read_memory_summary()
     queue_summary = preflight_queue_summary(session_id)
     acp_count = count_opencode_acp_processes()
-    eta = estimate_eta(load1, cpus, mem_available, swap_used, acp_count, queue_summary)
+    context_summary = preflight_context_summary(session_id)
+    eta = estimate_eta(load1, cpus, mem_available, swap_used, acp_count, queue_summary, context_summary)
     load_ratio = load1 / cpus if load1 is not None and cpus else None
     return {
         "session_id": session_id,
@@ -640,8 +847,29 @@ def build_preflight_sample(session_id, prompt_start_ms):
             "active_messages": queue_summary.get("active_messages"),
             "recent": queue_summary.get("recent"),
             "open_todos": queue_summary.get("open_todos"),
+            "context": context_summary,
         },
     }
+
+
+def build_context_warning_text(context):
+    if not isinstance(context, dict):
+        return None
+    risk = context.get("risk")
+    if risk not in ("watch", "heavy"):
+        return None
+    reason = context.get("reason") or "много истории"
+    handoff = context.get("handoff_file") or {}
+    handoff_name = handoff.get("relative_path") if isinstance(handoff, dict) else None
+    if risk == "heavy":
+        prefix = "контекст тяжёлый"
+    else:
+        prefix = "контекст растёт"
+    if handoff_name:
+        suffix = f"лучше новая сессия с {handoff_name}"
+    else:
+        suffix = "обновите AI_CONTEXT.md и начните новую сессию"
+    return f"{prefix} ({reason}); {suffix}"
 
 
 def build_preflight_title(sample):
@@ -666,10 +894,13 @@ def build_preflight_title(sample):
             f"сообщения {features.get('active_messages', 0)}, "
             f"todo {features.get('open_todos', 0)}"
         )
+    context_warning = build_context_warning_text(features.get("context"))
+    context_text = f"; {context_warning}" if context_warning else ""
     return (
         f"OpenCode перед стартом: CPU {load_text}, RAM свободно {ram_text}, "
         f"swap {swap_text}, ACP {acp_count}, очередь: {queue_text}; "
         f"оценка {sample.get('eta_label')}, причина: {sample.get('eta_reason')}"
+        f"{context_text}"
     )
 
 
@@ -734,6 +965,7 @@ def send_preflight_status(session_id, prompt_start_ms):
             title=title,
             eta=sample.get("eta_label"),
             eta_reason=sample.get("eta_reason"),
+            context_risk=(sample.get("features", {}).get("context") or {}).get("risk"),
         )
         return sample
     except Exception as exc:
