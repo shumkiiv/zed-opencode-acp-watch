@@ -17,6 +17,7 @@ English documentation: [README.md](README.md)
 - Предупреждает, когда лучше начать новую сессию с коротким handoff-файлом, например `AI_CONTEXT.md`.
 - Пишет JSONL-статистику ETA, чтобы позже сравнить прогноз с фактическим временем и скорректировать пороги.
 - Показывает русскоязычный heartbeat вида `OpenCode активен: ...`, если есть активные descendant tools, assistant messages или свежие обновления дочерних сессий.
+- Периодически заново объявляет synthetic-статус, чтобы Zed мог вернуть индикацию после reconnect/re-render, если UI потерял строку прогресса.
 - Не подставляет raw `session.title` в synthetic heartbeat: заголовки дочерних сессий OpenCode могут быть на английском, но wrapper оставляет их только в логах для диагностики.
 - Помечает synthetic-статус как `failed`, если OpenCode остановился после assistant-сообщения без финального текстового отчёта, например после provider interruption или `finish: unknown`.
 - Сериализует почти одновременные старты ACP, чтобы снизить риск `database is locked` на SQLite-базе OpenCode.
@@ -97,6 +98,7 @@ cd zed-opencode-acp-watch
 | `OPENCODE_ACP_WATCH_STATUS_RECENT_WINDOW_SEC` | `120` | Окно для свежей активности дочерних session/part. |
 | `OPENCODE_ACP_WATCH_STATUS_MAX_SEC` | равно active window | Максимальная жизнь status-monitor для одного prompt. |
 | `OPENCODE_ACP_WATCH_STATUS_IDLE_POLL_SEC` | `10` | Частота опроса после старта, если активность пока не видна. |
+| `OPENCODE_ACP_WATCH_STATUS_REANNOUNCE_SEC` | `60` | Как часто при живой активности заново отправлять полноценный synthetic `tool_call`, чтобы восстановить потерянную строку статуса в Zed. `0` отключает. |
 | `OPENCODE_ACP_WATCH_CANCEL_GRACE_SEC` | `30` | Сколько держать статус после `session/cancel`, пока обёртка проверяет, продолжает ли OpenCode писать активность сессии. |
 
 ## Диагностика
@@ -118,5 +120,7 @@ ETA показывается грубыми диапазонами: `до 1 ми
 Проверка контекста не сжимает и не удаляет историю OpenCode. Она только предупреждает, что текущую сессию лучше завершить, обновить короткий handoff-файл и продолжить работу в новой сессии. Если в рабочей директории есть `AI_CONTEXT.md` или другой файл из `OPENCODE_ACP_WATCH_CONTEXT_FILES`, wrapper покажет его имя в предупреждении.
 
 После `session/cancel` от Zed status-monitor не закрывает synthetic-статус сразу. Он ждёт `OPENCODE_ACP_WATCH_CANCEL_GRACE_SEC` и проверяет, появились ли в OpenCode новые обновления session, part или message после этого окна. Если работа продолжает двигаться, статус остаётся `in_progress`; если нет, закрывается как отменённый.
+
+Если Zed потерял видимую строку synthetic-статуса, обычные `tool_call_update` могут быть не видны. Поэтому при живой активности wrapper раз в `OPENCODE_ACP_WATCH_STATUS_REANNOUNCE_SEC` повторно отправляет полноценный synthetic `tool_call` с тем же `toolCallId`.
 
 Старые строки `running` в базе OpenCode могут быть stale. Считать задачу живой стоит только если продолжают обновляться сама сессия, дочерние сессии, parts, WAL-файл или лог OpenCode.

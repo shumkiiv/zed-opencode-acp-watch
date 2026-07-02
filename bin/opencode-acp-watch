@@ -33,6 +33,7 @@ MAX_HOLD_SEC = int(os.environ.get("OPENCODE_ACP_WATCH_MAX_HOLD_SEC", "60"))
 STATUS_MONITOR_MAX_SEC = int(os.environ.get("OPENCODE_ACP_WATCH_STATUS_MAX_SEC", str(ACTIVE_WINDOW_SEC)))
 STATUS_IDLE_POLL_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_STATUS_IDLE_POLL_SEC", "10"))
 STATUS_RECENT_WINDOW_SEC = int(os.environ.get("OPENCODE_ACP_WATCH_STATUS_RECENT_WINDOW_SEC", "120"))
+STATUS_REANNOUNCE_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_STATUS_REANNOUNCE_SEC", "60"))
 STATUS_START_GRACE_SEC = float(
     os.environ.get("OPENCODE_ACP_WATCH_STATUS_START_GRACE_SEC", str(max(LATE_GRACE_SEC, COMPLEX_PROMPT_SEC)))
 )
@@ -1138,6 +1139,7 @@ def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=F
     eta_recorded = False
     quiet_since = None
     last_heartbeat = 0.0
+    last_reannounce = time.monotonic() if initial_status_sent else 0.0
     exit_reason = "shutdown"
     log(
         "status_monitor_begin",
@@ -1225,13 +1227,24 @@ def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=F
                 if now - last_heartbeat >= max(2.0, POLL_SEC * 2):
                     last_heartbeat = now
                     title = activity_title(summary)
-                    if sent_status:
+                    reannounce = (
+                        STATUS_REANNOUNCE_SEC > 0
+                        and sent_status
+                        and now - last_reannounce >= STATUS_REANNOUNCE_SEC
+                    )
+                    if reannounce:
+                        send_tool_call(session_id, active, title)
+                        last_reannounce = now
+                        sent_status = True
+                        status_announced = True
+                    elif sent_status:
                         send_tool_call_update(session_id, "in_progress", title)
                     elif status_announced:
                         send_tool_call_update(session_id, "in_progress", title)
                         sent_status = True
                     else:
                         send_tool_call(session_id, active, title)
+                        last_reannounce = now
                         sent_status = True
                         status_announced = True
                     log(
@@ -1242,6 +1255,7 @@ def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=F
                         latest_title=summary.get("latest_title", ""),
                         latest_age=summary.get("latest_age"),
                         elapsed=round(elapsed, 2),
+                        reannounce=reannounce,
                     )
             else:
                 if quiet_since is None:
