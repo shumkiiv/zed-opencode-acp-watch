@@ -1024,14 +1024,13 @@ def status_monitor_until_idle(session_id, prompt_start_ms, initial_status_sent=F
                         elapsed=round(elapsed, 2),
                         missing_final_report=bool(idle_title),
                     )
-                    send_tool_call_update(
-                        session_id,
-                        "completed",
-                        idle_title or "OpenCode: активные инструменты завершили работу",
-                    )
+                    final_status = "failed" if idle_title else "completed"
+                    final_title = idle_title or "OpenCode: активные инструменты завершили работу"
+                    final_outcome = "missing_final_report" if idle_title else "completed"
+                    send_tool_call_update(session_id, final_status, final_title)
                     write_eta_stats(
                         preflight_sample,
-                        "completed",
+                        final_outcome,
                         actual_elapsed,
                         saw_activity,
                         {"missing_final_report": bool(idle_title)},

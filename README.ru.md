@@ -16,7 +16,7 @@ English documentation: [README.md](README.md)
 - Пишет JSONL-статистику ETA, чтобы позже сравнить прогноз с фактическим временем и скорректировать пороги.
 - Показывает русскоязычный heartbeat вида `OpenCode активен: ...`, если есть активные descendant tools, assistant messages или свежие обновления дочерних сессий.
 - Не подставляет raw `session.title` в synthetic heartbeat: заголовки дочерних сессий OpenCode могут быть на английском, но wrapper оставляет их только в логах для диагностики.
-- Предупреждает, если OpenCode остановился после assistant-сообщения без финального текстового отчёта, например после provider interruption или `finish: unknown`.
+- Помечает synthetic-статус как `failed`, если OpenCode остановился после assistant-сообщения без финального текстового отчёта, например после provider interruption или `finish: unknown`.
 - Сериализует почти одновременные старты ACP, чтобы снизить риск `database is locked` на SQLite-базе OpenCode.
 - Помечает синтетический heartbeat как `failed` после `session/cancel`, чтобы Zed не подавал ложный сигнал "готово" и не оставлял старый прогресс видимым, пока задача перезапускается.
 - Продлевает status-monitor после `OPENCODE_ACP_WATCH_STATUS_MAX_SEC`, если OpenCode DB всё ещё показывает активность, чтобы длинные живые задачи не теряли индикацию.
