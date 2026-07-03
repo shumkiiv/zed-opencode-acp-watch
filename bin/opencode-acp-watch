@@ -41,6 +41,8 @@ STATUS_START_GRACE_SEC = float(
 CANCEL_GRACE_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_CANCEL_GRACE_SEC", "30"))
 PREFLIGHT_ENABLED = os.environ.get("OPENCODE_ACP_WATCH_PREFLIGHT", "1") not in ("0", "false", "False")
 PREFLIGHT_DB_TIMEOUT_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC", "0.5"))
+DB_QUERY_TIMEOUT_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_DB_QUERY_TIMEOUT_SEC", "1.0"))
+PREFLIGHT_DB_QUERY_TIMEOUT_SEC = float(os.environ.get("OPENCODE_ACP_WATCH_PREFLIGHT_DB_QUERY_TIMEOUT_SEC", "0.7"))
 ETA_STATS_ENABLED = os.environ.get("OPENCODE_ACP_WATCH_ETA_STATS", "1") not in ("0", "false", "False")
 ETA_STATS_PATH = os.environ.get(
     "OPENCODE_ACP_WATCH_ETA_STATS_PATH",
@@ -96,6 +98,19 @@ def log(message, **fields):
                 fh.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
     except Exception:
         pass
+
+
+def connect_readonly(lock_timeout_sec=1.0, query_timeout_sec=None):
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=lock_timeout_sec)
+    conn.execute("pragma query_only=ON")
+    if query_timeout_sec and query_timeout_sec > 0:
+        deadline = time.monotonic() + query_timeout_sec
+
+        def abort_slow_query():
+            return 1 if time.monotonic() >= deadline else 0
+
+        conn.set_progress_handler(abort_slow_query, 1000)
+    return conn
 
 
 def acquire_start_lock():
@@ -198,8 +213,7 @@ def extract_session_id_from_cancel(message):
 def active_descendant_count(session_id):
     cutoff = now_ms() - ACTIVE_WINDOW_SEC * 1000
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=1)
-        conn.execute("pragma query_only=ON")
+        conn = connect_readonly(1, DB_QUERY_TIMEOUT_SEC)
         query = """
         with recursive tree(id) as (
           values(?)
@@ -238,8 +252,7 @@ def descendant_activity_summary(session_id):
     active_cutoff = now_ms() - ACTIVE_WINDOW_SEC * 1000
     recent_cutoff = now_ms() - STATUS_RECENT_WINDOW_SEC * 1000
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=1)
-        conn.execute("pragma query_only=ON")
+        conn = connect_readonly(1, DB_QUERY_TIMEOUT_SEC)
         query = """
         with recursive tree(id) as (
           values(?)
@@ -478,8 +491,7 @@ def preflight_queue_summary(session_id):
     active_cutoff = now_ms() - ACTIVE_WINDOW_SEC * 1000
     recent_cutoff = now_ms() - STATUS_RECENT_WINDOW_SEC * 1000
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=PREFLIGHT_DB_TIMEOUT_SEC)
-        conn.execute("pragma query_only=ON")
+        conn = connect_readonly(PREFLIGHT_DB_TIMEOUT_SEC, PREFLIGHT_DB_QUERY_TIMEOUT_SEC)
         query = """
         with recursive tree(id) as (
           values(?)
@@ -607,8 +619,7 @@ def preflight_context_summary(session_id):
     if not CONTEXT_WARN_ENABLED:
         return {"risk": "disabled"}
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=PREFLIGHT_DB_TIMEOUT_SEC)
-        conn.execute("pragma query_only=ON")
+        conn = connect_readonly(PREFLIGHT_DB_TIMEOUT_SEC, PREFLIGHT_DB_QUERY_TIMEOUT_SEC)
         query = """
         with recursive tree(id) as (
           values(?)
@@ -978,8 +989,7 @@ def send_preflight_status(session_id, prompt_start_ms):
 def missing_final_report_title(session_id, since_ms):
     cutoff = since_ms or (now_ms() - ACTIVE_WINDOW_SEC * 1000)
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=1)
-        conn.execute("pragma query_only=ON")
+        conn = connect_readonly(1, DB_QUERY_TIMEOUT_SEC)
         query = """
         select
           m.id,
@@ -1029,8 +1039,7 @@ def stale_unfinished_assistant_title(session_id, since_ms):
     stale_cutoff = now_ms() - int(STALE_ASSISTANT_SEC * 1000)
     prompt_cutoff = since_ms or (now_ms() - ACTIVE_WINDOW_SEC * 1000)
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=1)
-        conn.execute("pragma query_only=ON")
+        conn = connect_readonly(1, DB_QUERY_TIMEOUT_SEC)
         query = """
         with recursive tree(id) as (
           values(?)
@@ -1081,8 +1090,7 @@ def stale_unfinished_assistant_title(session_id, since_ms):
 
 def recent_descendant_count(session_id, since_ms):
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=1)
-        conn.execute("pragma query_only=ON")
+        conn = connect_readonly(1, DB_QUERY_TIMEOUT_SEC)
         query = """
         with recursive tree(id) as (
           values(?)

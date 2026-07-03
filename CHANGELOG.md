@@ -8,5 +8,6 @@
 - Add preflight context-weight warnings with handoff-file hints for long or token-heavy sessions.
 - Re-announce live synthetic statuses periodically so Zed can restore a lost progress row after reconnect/re-render.
 - Mark stale unfinished assistant streams as failed when they stop updating and no tools are active.
+- Add hard execution timeouts for SQLite status queries so large OpenCode databases do not freeze startup/preflight.
 - Add English and Russian documentation.
 - Add installer and diagnostics scripts.

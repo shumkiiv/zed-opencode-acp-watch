@@ -85,7 +85,9 @@ Restart the Zed/OpenCode agent session after changing the wrapper or Zed setting
 | `OPENCODE_ACP_WATCH_HOLD` | `0` | Keep non-blocking mode. Legacy hold mode is still available with `1`. |
 | `OPENCODE_ACP_WATCH_POLL_SEC` | `2` | Poll interval while activity is visible. |
 | `OPENCODE_ACP_WATCH_PREFLIGHT` | `1` | Show startup resource and local queue status before a prompt. |
-| `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC` | `0.5` | Maximum wait for the short read-only OpenCode DB query used by preflight. |
+| `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC` | `0.5` | Maximum SQLite lock wait for the short preflight query. |
+| `OPENCODE_ACP_WATCH_DB_QUERY_TIMEOUT_SEC` | `1.0` | Hard execution limit for regular read-only SQLite queries used by the wrapper. |
+| `OPENCODE_ACP_WATCH_PREFLIGHT_DB_QUERY_TIMEOUT_SEC` | `0.7` | Hard execution limit for preflight SQLite queries. |
 | `OPENCODE_ACP_WATCH_CONTEXT_WARN` | `1` | Add a preflight warning when the current session is context-heavy. |
 | `OPENCODE_ACP_WATCH_CONTEXT_FILES` | `AI_CONTEXT.md:AGENT_CONTEXT.md:HANDOFF.md:STATUS.md:NEXT_STEPS.md:.ai/context.md:.ai/handoff.md:docs/AI_CONTEXT.md` | Short handoff files the wrapper looks for in the session working directory. |
 | `OPENCODE_ACP_WATCH_CONTEXT_INPUT_WARN_TOKENS` / `OPENCODE_ACP_WATCH_CONTEXT_INPUT_HEAVY_TOKENS` | `3000000` / `8000000` | Total input-token thresholds for the session tree. |
@@ -115,7 +117,7 @@ The script prints recent sessions, running/pending tools, and OpenCode DB/log mt
 
 This wrapper does not modify OpenCode sessions, kill processes, or edit projects. It only observes OpenCode's database and sends ACP status updates to Zed.
 
-The preflight status cannot see the model provider's external queue. It gives a local estimate from `/proc/loadavg`, `/proc/meminfo`, the process list, and one short read-only query against OpenCode's SQLite database. The estimate also uses the number of parallel ACP sessions and open todos in the current session tree. In normal use this is cheaper than a regular heartbeat poll; if the database is busy, the query is capped by `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC`.
+The preflight status cannot see the model provider's external queue. It gives a local estimate from `/proc/loadavg`, `/proc/meminfo`, the process list, and one short read-only query against OpenCode's SQLite database. The estimate also uses the number of parallel ACP sessions and open todos in the current session tree. In normal use this is cheaper than a regular heartbeat poll. If the database is busy, lock wait is capped by `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC`; if the SELECT itself runs too long, it is interrupted after `OPENCODE_ACP_WATCH_PREFLIGHT_DB_QUERY_TIMEOUT_SEC`.
 
 ETA is intentionally coarse: `до 1 мин`, `1-3 мин`, `3-10 мин`, or `10+ мин`. The default prediction is conservative after local calibration: a clean local machine starts at `1-3 мин`; active tools, open todos, or several ACP sessions move the estimate to `3-10 мин` or `10+ мин`. After completion, cancellation, timeout, or monitor shutdown, one JSONL row is appended to `OPENCODE_ACP_WATCH_ETA_STATS_PATH` with `eta_label`, actual `elapsed_sec`, outcome, `eta_hit`, and the resource snapshot. That history is meant for tuning thresholds to a specific machine and project mix.
 

@@ -85,7 +85,9 @@ cd zed-opencode-acp-watch
 | `OPENCODE_ACP_WATCH_HOLD` | `0` | Неблокирующий режим. Старый режим удержания можно включить через `1`. |
 | `OPENCODE_ACP_WATCH_POLL_SEC` | `2` | Частота опроса, когда активность видна. |
 | `OPENCODE_ACP_WATCH_PREFLIGHT` | `1` | Показывать стартовый статус ресурсов и локальной очереди перед prompt. |
-| `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC` | `0.5` | Максимальное ожидание короткого read-only запроса к OpenCode DB для preflight. |
+| `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC` | `0.5` | Максимальное ожидание SQLite lock для короткого preflight-запроса. |
+| `OPENCODE_ACP_WATCH_DB_QUERY_TIMEOUT_SEC` | `1.0` | Жёсткий лимит выполнения обычных read-only SQLite-запросов wrapper. |
+| `OPENCODE_ACP_WATCH_PREFLIGHT_DB_QUERY_TIMEOUT_SEC` | `0.7` | Жёсткий лимит выполнения preflight SQLite-запросов. |
 | `OPENCODE_ACP_WATCH_CONTEXT_WARN` | `1` | Добавлять в preflight предупреждение, если текущая сессия стала тяжёлой по контексту. |
 | `OPENCODE_ACP_WATCH_CONTEXT_FILES` | `AI_CONTEXT.md:AGENT_CONTEXT.md:HANDOFF.md:STATUS.md:NEXT_STEPS.md:.ai/context.md:.ai/handoff.md:docs/AI_CONTEXT.md` | Короткие handoff-файлы, которые wrapper ищет в рабочей директории сессии. |
 | `OPENCODE_ACP_WATCH_CONTEXT_INPUT_WARN_TOKENS` / `OPENCODE_ACP_WATCH_CONTEXT_INPUT_HEAVY_TOKENS` | `3000000` / `8000000` | Пороги по суммарным input tokens в дереве сессии. |
@@ -115,7 +117,7 @@ cd zed-opencode-acp-watch
 
 Обёртка не меняет OpenCode-сессии, не убивает процессы и не редактирует проекты. Она только читает базу OpenCode и отправляет статусные ACP-обновления в Zed.
 
-Preflight-статус не знает внешнюю очередь провайдера модели. Он даёт локальную оценку по `/proc/loadavg`, `/proc/meminfo`, списку процессов и короткому read-only запросу к SQLite-базе OpenCode. Оценка также учитывает число параллельных ACP-сессий и открытые todo в дереве текущей сессии. Обычно это дешевле одного обычного heartbeat-опроса; если база занята, запрос ограничен таймаутом `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC`.
+Preflight-статус не знает внешнюю очередь провайдера модели. Он даёт локальную оценку по `/proc/loadavg`, `/proc/meminfo`, списку процессов и короткому read-only запросу к SQLite-базе OpenCode. Оценка также учитывает число параллельных ACP-сессий и открытые todo в дереве текущей сессии. Обычно это дешевле одного обычного heartbeat-опроса. Если база занята, ожидание lock ограничено `OPENCODE_ACP_WATCH_PREFLIGHT_DB_TIMEOUT_SEC`; если сам SELECT идёт слишком долго, он прерывается через `OPENCODE_ACP_WATCH_PREFLIGHT_DB_QUERY_TIMEOUT_SEC`.
 
 ETA показывается грубыми диапазонами: `до 1 мин`, `1-3 мин`, `3-10 мин`, `10+ мин`. После локальной калибровки прогноз стал консервативнее: чистая машина начинается с `1-3 мин`, а активные tools, открытые todo или несколько ACP-сессий поднимают оценку до `3-10 мин` или `10+ мин`. После завершения, отмены, таймаута или остановки monitor в `OPENCODE_ACP_WATCH_ETA_STATS_PATH` добавляется строка с `eta_label`, фактическим `elapsed_sec`, исходом, `eta_hit` и снимком ресурсов. Эта история нужна для настройки порогов под конкретную машину и проекты.
 
